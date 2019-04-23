@@ -148,6 +148,10 @@ def _bro2neo(rec):
     return rec
 
 
+def any2flow():
+    pass
+
+
 def any2neo(desc, kind=None):
     if kind is None:
         kind = desc.get("kind", "flow")
@@ -197,7 +201,7 @@ def any2neo(desc, kind=None):
 
 
 def conn2flow(bulk, rec):
-    utils.LOGGER.debug(str(rec))
+    # utils.LOGGER.debug(str(rec))
     if rec['proto'] == 'icmp':
         # FIXME incorrect: source & dest flow?
         rec['type'], rec['code'] = rec.pop('id_orig_p'), rec.pop('id_resp_p')
@@ -212,30 +216,31 @@ IP_RE = re.compile(r'^\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}$|'
 
 
 def dns2flow(bulk, rec):
-    # FIXME
+    rec['sport'], rec['dport'] = rec.pop('id_orig_p'), rec.pop('id_resp_p')
+    db.flow.dns2flow(bulk, rec)
 
+
+def dns2neo(bulk, rec):
+    # FIXME
     answers = rec.get("answers", None)
     rec["answers"] = answers if answers else []
     if (rec.get("query", "") or "").endswith(".in-addr.arpa"):
         # Reverse DNS
-        # rec["names"] = rec["answers"]
         rec["addrs"] = ['.'.join(reversed(rec["query"].split(".")[:4]))]
     else:
         # Forward DNS
         # Name to resolve + aliases
-        # rec["names"] =  [rec["query"]] + [addr for addr in rec["answers"]
-        #                                   if not IP_RE.match(addr)]
         rec["addrs"] = [addr for addr in
                         rec.get("answers", []) if IP_RE.match(addr)]
-    if db.flow.db_version[0] >= 3:
-        rec["answers"] = ', '.join(rec.get("answers") or [])
+    # if db.flow.db_version[0] >= 3:
+    #     rec["answers"] = ', '.join(rec.get("answers") or [])
 
-    any2neo(ALL_DESCS["dns"])(bulk, rec)
+    # any2neo(ALL_DESCS["dns"])(bulk, rec)
     # TODO: loop in neo
     for addr in rec["addrs"]:
         tmp_rec = rec.copy()
         tmp_rec["addr"] = addr
-        any2neo(ALL_DESCS["dns"], "host")(bulk, tmp_rec)
+        # any2neo(ALL_DESCS["dns"], "host")(bulk, tmp_rec)
 
 
 def knwon_devices2flow(bulk, rec):

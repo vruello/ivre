@@ -4526,13 +4526,15 @@ class MongoDBFlow(MongoDB, DBFlow):
             key['dst_port'] = rec['dport']
         return key
 
-    def _get_passive_keys(self, rec):
+    def _get_passive_keys(self, rec, recontype=None):
         keys = [
             {'addr_0': rec['src_addr_0'], 'addr_1': rec['src_addr_1']},
             {'addr_0': rec['dst_addr_0'], 'addr_1': rec['dst_addr_1']}
         ]
         for key in keys:
-            key['recontype'] = 'UNKNOWN'
+            key['recontype'] = (recontype if recontype is not None
+                                else "UNKNOWN")
+            key['schema_version'] = passive.SCHEMA_VERSION
         return keys
 
     def _add_or_update_dict_in_dict(self, main_dict, main_key, key, value):
@@ -4549,7 +4551,6 @@ class MongoDBFlow(MongoDB, DBFlow):
         updatespec = {
             '$min': {'firstseen': rec['start_time']},
             '$max': {'lastseen': rec['end_time']},
-            '$set': {'proto': rec['proto']},
             '$inc': {
                 'sdpkts': rec['orig_pkts'],
                 'dspkts': rec['resp_pkts'],
@@ -4566,19 +4567,46 @@ class MongoDBFlow(MongoDB, DBFlow):
                                              'src_ports', rec['sport'])
 
         flow_bulk.find(findspec).upsert().update(updatespec)
+        return [findspec]
+
+    def _dns2flow(self, flow_bulk, rec):
+        """
+        Take a parsed dns.log line entry and add it to flow bulk
+        """
+        findspec = self._get_flow_key(rec)
+
+        updatespec = {
+            '$min': {'firstseen': rec['start_time']},
+            '$max': {'lastseen': rec['end_time']},
+            # TODO : should be optionnal
+            '$addToSet': {'meta': {
+                'proto': 'dns',
+                'query': rec['query'],
+                'answers': rec['answers'],
+                'class': rec['qclass_name'],
+                'rcode': rec['rcode_name'],
+                'type': rec['qtype_name']
+            }},
+            '$setOnInsert': {'count': 1}
+        }
+
+        self._add_or_update_dict_in_dict(updatespec, '$addToSet',
+                                         'src_ports', rec['sport'])
+
+        flow_bulk.find(findspec).upsert().update(updatespec)
+        return [findspec]
 
     def _conn2passive(self, passive_bulk, rec):
         """
         Take a parsed conn.log line entry and add it to passive bulk
         """
-
+        added_passive = []
         # Try to use MongoDBPassive later
 
         updatespec = {
             '$inc': {'count': 1},
             '$min': {'firstseen': rec['start_time']},
             '$max': {'lastseen': rec['end_time']},
-            '$set': {'schema_version': passive.SCHEMA_VERSION},
             # '$set': {'sensor': rec['sensor']}
         }
 
@@ -4589,20 +4617,104 @@ class MongoDBFlow(MongoDB, DBFlow):
 
         for findspec in findspecs:
             passive_bulk.find(findspec).upsert().update(updatespec)
+            added_passive.append(findspec)
+        return added_passive
 
-    def _conn2timescales(self, timescale_bulk, rec):
+    def _dns2passive(self, passive_bulk, rec):
+        """
+        Take a parsed dns.log line entry and add it to passive bulk
+        It inserts: source host, destination host, queries/answers
+        related hosts with DNS additional informations
+        """
+
+        added_passive = []
+
+        # Insert source and destination
+        findspecs = self._get_passive_keys(rec)
+
+        updatespec = {
+            "$min": {"firstseen": rec["start_time"]},
+            "$max": {"lastseen": rec["end_time"]},
+            "$setOnInsert": {
+                "schema_version": passive.SCHEMA_VERSION,
+                "count": 1
+            }
+        }
+        for findspec in findspecs:
+            added_passive.append(findspec)
+            passive_bulk.find(findspec).upsert().update(updatespec)
+
+        # Insert queries/answers hosts
+        # TODO : Manage CNAME, NS and MX queries
+        updatespec = {}
+        query = rec.get("query", "") or ""
+        # dns.log don't store the answer type, so we need guess it
+        if utils.is_ptr(query):  # PTR query
+            addr = utils.ptr2addr(query)
+            try:
+                addr_0, addr_1 = self.ip2internal(addr)
+            # In case of malformed PTR address
+            except ValueError:
+                return added_passive
+            answers = rec.get('answers', [])
+            server_host, server_port = (
+                [rec['src'], rec['sport']]
+                if answers
+                else [rec['dst'], rec['dport']])
+            # Upsert the searched host
+            findspec = {
+                "addr_0": addr_0,
+                "addr_1": addr_1,
+                "recontype": "DNS_ANSWER",
+                "source": "PTR-%s-%s" % (server_host, server_port),
+                "value": rec['query'],
+            }
+            updatespec = {
+                "$min": {"firstseen": rec['start_time']},
+                "$max": {"lastseen": rec['end_time']},
+                "$setOnInsert": {"count": 1}
+            }
+            added_passive.append(findspec)
+            passive_bulk.find(findspec).upsert().update(updatespec)
+        else:
+            # A query response
+            addrs = [addr for addr in (rec["answers"] or [])
+                     if utils.IP_RE.match(addr)]
+            # Upsert hosts found in the answer
+            for addr in addrs:
+                addr_0, addr_1 = self.ip2internal(addr)
+                server_host, server_port = [rec['dst'], rec['dport']]
+                a_type = "A" if utils.IPv4_RE.match(addr) else "AAAA"
+                findspec = {
+                    "addr_0": addr_0,
+                    "addr_1": addr_1,
+                    "recontype": "DNS_ANSWER",
+                    "source": "%s-%s-%s" % (a_type, server_host, server_port),
+                    "value": rec["query"],
+                }
+                updatespec = {
+                    "$min": {"firstseen": rec['start_time']},
+                    "$max": {"lastseen": rec['end_time']},
+                    "$setOnInsert": {"count": 1}
+                }
+                updatespec["$setOnInsert"].update(
+                    passive._getinfos_dns(findspec))
+                added_passive.append(findspec)
+                passive_bulk.find(findspec).upsert().update(updatespec)
+        return added_passive
+
+    def _conn2timescales(self, timescale_bulk, rec, added_flows,
+                         added_passive):
         findspec = {
             'time': self.date_round(rec['start_time'])
         }
 
         updatespec = {
-            '$addToSet': {'flows': self._get_flow_key(rec)}
+            '$addToSet': {
+                'flows': added_flows,
+                'hosts': added_passive
+            }
         }
-
-        passive_keys = self._get_passive_keys(rec)
-        for passive_key in passive_keys:
-            self._add_or_update_dict_in_dict(updatespec, '$addToSet',
-                                             'hosts', passive_key)
 
         timescale_bulk.find(findspec).upsert().update(updatespec)
 
@@ -4612,9 +4724,21 @@ class MongoDBFlow(MongoDB, DBFlow):
         """
         rec['src_addr_0'], rec['src_addr_1'] = self.ip2internal(rec['src'])
         rec['dst_addr_0'], rec['dst_addr_1'] = self.ip2internal(rec['dst'])
-        self._conn2flow(bulks[self.column_flow], rec)
-        self._conn2passive(bulks[self.column_passive], rec)
-        self._conn2timescales(bulks[self.column_timescale], rec)
+        added_flows = self._conn2flow(bulks[self.column_flow], rec)
+        added_passive = self._conn2passive(bulks[self.column_passive], rec)
+        self._conn2timescales(bulks[self.column_timescale], rec,
+                              added_flows, added_passive)
+
+    def dns2flow(self, bulks, rec):
+        """
+        Take a parsed dns.log line entry and add it to bulks
+        """
+        rec['src_addr_0'], rec['src_addr_1'] = self.ip2internal(rec['src'])
+        rec['dst_addr_0'], rec['dst_addr_1'] = self.ip2internal(rec['dst'])
+        added_flows = self._dns2flow(bulks[self.column_flow], rec)
+        added_passive = self._dns2passive(bulks[self.column_passive], rec)
+        self._conn2timescales(bulks[self.column_timescale], rec,
+                              added_flows, added_passive)
 
     def bulk_commit(self, bulks):
         for bulk in bulks:
@@ -4622,9 +4746,13 @@ class MongoDBFlow(MongoDB, DBFlow):
                 start_time = time.time()
                 result = bulk.execute()
                 newtime = time.time()
-                rate = result.get('nInserted') / (newtime - start_time)
-                utils.LOGGER.debug("%d inserts, %f/sec\n",
-                                   result.get('nInserted'), rate)
+                insert_rate = result.get('nInserted') / (newtime - start_time)
+                upsert_rate = result.get('nUpserted') / (newtime - start_time)
+                utils.LOGGER.debug("%d inserts, %f/sec",
+                                   result.get('nInserted'), insert_rate)
+                utils.LOGGER.debug("%d upserts, %f/sec",
+                                   result.get('nUpserted'), upsert_rate)
+
             except BulkWriteError as bwe:
                 print(bwe.details)
 
