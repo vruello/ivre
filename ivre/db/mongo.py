@@ -51,10 +51,9 @@ from past.builtins import basestring
 import bson
 import pymongo
 
-import random
 from ivre.db import DB, DBActive, DBNmap, DBPassive, DBAgent, DBView, DBFlow, \
     LockError
-from ivre import config, passive, utils, xmlnmap
+from ivre import config, passive, utils, xmlnmap, flow
 from pymongo.errors import BulkWriteError
 
 
@@ -4569,25 +4568,20 @@ class MongoDBFlow(MongoDB, DBFlow):
         flow_bulk.find(findspec).upsert().update(updatespec)
         return [findspec]
 
-    def _dns2flow(self, flow_bulk, rec):
+    def _any2flow(self, flow_bulk, rec, meta_fields):
         """
-        Take a parsed dns.log line entry and add it to flow bulk
+        Take a parsed *.log line entry and appropriate meta fields
+        in order to add it to flow bulk
         """
         findspec = self._get_flow_key(rec)
-
+        meta_dict = {}
+        for field, key in meta_fields.items():
+            meta_dict[field] = rec[field] if key is None else rec[key]
         updatespec = {
             '$min': {'firstseen': rec['start_time']},
             '$max': {'lastseen': rec['end_time']},
-            # TODO : should be optionnal
-            '$addToSet': {'meta': {
-                'proto': 'dns',
-                'query': rec['query'],
-                'answers': rec['answers'],
-                'class': rec['qclass_name'],
-                'rcode': rec['rcode_name'],
-                'type': rec['qtype_name']
-            }},
-            '$setOnInsert': {'count': 1}
+            '$addToSet': {'meta': meta_dict},  # TODO : should be optionnal
+            '$inc': {'count': 1}
         }
 
         self._add_or_update_dict_in_dict(updatespec, '$addToSet',
@@ -4703,6 +4697,49 @@ class MongoDBFlow(MongoDB, DBFlow):
                 passive_bulk.find(findspec).upsert().update(updatespec)
         return added_passive
 
+    def _http2passive_store_records(self, passive_bulk, findspec, updatespec,
+                                    rec, recontypes, with_port):
+        added_passive = []
+        for key, headers in recontypes.items():
+            fdspec = findspec.copy()
+            fdspec['recontype'] = key
+            for header, rec_key in headers.items():
+                fspec = fdspec.copy()
+                fspec.update({
+                    'source': header,
+                    'value': rec[rec_key]
+                })
+                if with_port:
+                    fspec.update({'port': rec['dport']})
+                passive_bulk.find(fspec).upsert().update(updatespec)
+                added_passive.append(fspec)
+        return added_passive
+
+    def _http2passive(self, passive_bulk, rec):
+        """
+        Take a parsed http.local line entry and add it to passive bulk
+        """
+        added_passive = []
+        # Try to use MongoDBPassive later
+
+        updatespec = {
+            '$inc': {'count': 1},
+            '$min': {'firstseen': rec['start_time']},
+            '$max': {'lastseen': rec['end_time']},
+            # '$set': {'sensor': rec['sensor']}
+        }
+
+        [srcspec, dstspec] = self._get_passive_keys(rec)
+        added_passive.extend(
+            self._http2passive_store_records(
+                passive_bulk, srcspec, updatespec, rec,
+                flow.HTTP_PASSIVE_RECONTYPES_CLIENT, False))
+        added_passive.extend(
+            self._http2passive_store_records(
+                passive_bulk, dstspec, updatespec, rec,
+                flow.HTTP_PASSIVE_RECONTYPES_SERVER, True))
+        return added_passive
+
     def _conn2timescales(self, timescale_bulk, rec, added_flows,
                          added_passive):
         findspec = {
@@ -4711,8 +4748,8 @@ class MongoDBFlow(MongoDB, DBFlow):
 
         updatespec = {
             '$addToSet': {
-                'flows': added_flows,
-                'hosts': added_passive
+                'flows': {'$each': added_flows},
+                'hosts': {'$each': added_passive}
             }
         }
 
@@ -4735,8 +4772,21 @@ class MongoDBFlow(MongoDB, DBFlow):
         """
         rec['src_addr_0'], rec['src_addr_1'] = self.ip2internal(rec['src'])
         rec['dst_addr_0'], rec['dst_addr_1'] = self.ip2internal(rec['dst'])
-        added_flows = self._dns2flow(bulks[self.column_flow], rec)
+        added_flows = self._any2flow(
+            bulks[self.column_flow], rec, flow.META_DESC['dns'])
         added_passive = self._dns2passive(bulks[self.column_passive], rec)
+        self._conn2timescales(bulks[self.column_timescale], rec,
+                              added_flows, added_passive)
+
+    def http2flow(self, bulks, rec):
+        """
+        Take a parsed dns.log line entry and add it to bulks
+        """
+        rec['src_addr_0'], rec['src_addr_1'] = self.ip2internal(rec['src'])
+        rec['dst_addr_0'], rec['dst_addr_1'] = self.ip2internal(rec['dst'])
+        added_flows = self._any2flow(
+            bulks[self.column_flow], rec, flow.META_DESC['http'])
+        added_passive = self._http2passive(bulks[self.column_passive], rec)
         self._conn2timescales(bulks[self.column_timescale], rec,
                               added_flows, added_passive)
 
@@ -4765,15 +4815,15 @@ class MongoDBFlow(MongoDB, DBFlow):
         self.db[self.columns[self.column_timescale]].drop()
 
     def get_flows(self):
-        for flow in self.find(self.columns[self.column_flow]):
+        for f in self.find(self.columns[self.column_flow]):
             try:
-                flow['src_addr'] = self.internal2ip([flow.pop('src_addr_0'),
-                                                     flow.pop('src_addr_1')])
-                flow['dst_addr'] = self.internal2ip([flow.pop('dst_addr_0'),
-                                                     flow.pop('dst_addr_1')])
+                f['src_addr'] = self.internal2ip([f.pop('src_addr_0'),
+                                                  f.pop('src_addr_1')])
+                f['dst_addr'] = self.internal2ip([f.pop('dst_addr_0'),
+                                                  f.pop('dst_addr_1')])
             except (KeyError):
                 pass
-            yield flow
+            yield f
 
     def get_flows_count(self):
         sources = self.db[self.columns[self.column_flow]].aggregate([
@@ -4800,9 +4850,9 @@ class MongoDBFlow(MongoDB, DBFlow):
             {'$count': 'count'}
         ]).next()['count']
 
-        flows = self.db[self.columns[self.column_flow]].count_documents()
+        f = self.db[self.columns[self.column_flow]].count_documents({})
 
-        return {'clients': sources, 'servers': destinations, 'flows': flows}
+        return {'clients': sources, 'servers': destinations, 'flows': f}
 
     def from_filters(self, filters, limit=None, skip=0, orderby="", mode=None,
                      timeline=False):

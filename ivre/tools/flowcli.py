@@ -68,6 +68,7 @@ def display_rec(rec):
     print('\t', end='')
     print('%s\t' % rec.get('firstseen'), end='')
     print('%s\t' % rec.get('lastseen'), end='')
+    print('%d\t' % rec.get('count'), end='')
     print('%d\t%d\t%d\t%d' % (rec.get('sdpkts', 0), rec.get('sdbytes', 0),
                               rec.get('dspkts', 0), rec.get('dsbytes', 0)))
 

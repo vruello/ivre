@@ -243,6 +243,12 @@ def dns2neo(bulk, rec):
         # any2neo(ALL_DESCS["dns"], "host")(bulk, tmp_rec)
 
 
+def http2flow(bulk, rec):
+    rec['sport'], rec['dport'] = rec.pop('id_orig_p'), rec.pop('id_resp_p')
+    rec['proto'] = 'tcp'
+    db.flow.http2flow(bulk, rec)
+
+
 def knwon_devices2flow(bulk, rec):
     any2neo(ALL_DESCS["known_devices__name"], "host")(bulk, rec)
     any2neo(ALL_DESCS["known_devices__mac"], "host")(bulk, rec)
@@ -251,6 +257,7 @@ def knwon_devices2flow(bulk, rec):
 FUNCTIONS = {
     "conn": conn2flow,
     "dns": dns2flow,
+    "http": http2flow,
     "known_devices": knwon_devices2flow,
 }
 
@@ -296,5 +303,5 @@ def main():
                     continue
                 func(bulk, _bro2neo(line))
             db.flow.bulk_commit(bulk)
-            if brof.path == "conn" and not args.no_cleanup:
-                db.flow.cleanup_flows()
+            # if brof.path == "conn" and not args.no_cleanup:
+            #   db.flow.cleanup_flows()
