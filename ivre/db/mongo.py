@@ -4497,6 +4497,11 @@ class MongoDBFlow(MongoDB, DBFlow):
         MongoDB.__init__(self, host, dbname, **kargs)
         DBFlow.__init__(self)
         self.columns = [colname_flows, colname_passive, colname_timescales]
+        self.passive_inserters = {
+            'http': self._http2passive,
+            'dns': self._dns2passive,
+            'ssh': self._ssh2passive
+        }
 
     def start_bulk_insert(self):
         """
@@ -4614,6 +4619,61 @@ class MongoDBFlow(MongoDB, DBFlow):
             added_passive.append(findspec)
         return added_passive
 
+    def _ssh2passive_insert_entries(self, passive_bulk, rec, spec, updatespec,
+                                    is_server):
+        keys = flow.ssh2passive_keys(rec, is_server)
+        added_passive = []
+        for key in keys:
+            reconspec = spec.copy()
+            reconspec['recontype'] = key['recontype']
+            for entry in key['entries']:
+                entryspec = reconspec.copy()
+                entryspec['source'] = entry['source']
+                entryspec['value'] = entry['value']
+                passive_bulk.find(entryspec).upsert().update(updatespec)
+                added_passive.append(entryspec)
+        return added_passive
+
+    def _ssh2passive_insert_software(self, passive_bulk, rec, spec, updatespec,
+                                     is_server):
+        softspec = spec.copy()
+        softspec['recontype'] = 'SSH_SERVER' if is_server else 'SSH_CLIENT'
+        if 'source' in softspec:
+            del softspec['source']
+        softspec['value'] = (rec.get('server') if is_server
+                             else rec.get('client'))
+        passive_bulk.find(softspec).upsert().update(updatespec)
+        return [softspec]
+
+    def _ssh2passive(self, passive_bulk, rec):
+        added_passive = []
+        updatespec = {
+            "$min": {"firstseen": rec["start_time"]},
+            "$max": {"lastseen": rec["end_time"]},
+            "$setOnInsert": {
+                "schema_version": passive.SCHEMA_VERSION,
+            },
+            "$inc": {'count': 1}
+        }
+        [clientspec, serverspec] = self._get_passive_keys(rec)
+        added_passive.extend(
+            self._ssh2passive_insert_software(passive_bulk, rec,
+                                              clientspec, updatespec,
+                                              False))
+        added_passive.extend(
+            self._ssh2passive_insert_software(passive_bulk, rec,
+                                              serverspec, updatespec,
+                                              True))
+        added_passive.extend(
+            self._ssh2passive_insert_entries(passive_bulk, rec,
+                                             clientspec, updatespec,
+                                             False))
+        added_passive.extend(
+            self._ssh2passive_insert_entries(passive_bulk, rec,
+                                             serverspec, updatespec,
+                                             True))
+        return added_passive
+
     def _dns2passive(self, passive_bulk, rec):
         """
         Take a parsed dns.log line entry and add it to passive bulk
@@ -4717,18 +4777,15 @@ class MongoDBFlow(MongoDB, DBFlow):
 
     def _http2passive(self, passive_bulk, rec):
         """
-        Take a parsed http.local line entry and add it to passive bulk
+        Take a parsed http.log line entry and add it to passive bulk
         """
         added_passive = []
-        # Try to use MongoDBPassive later
-
         updatespec = {
             '$inc': {'count': 1},
             '$min': {'firstseen': rec['start_time']},
             '$max': {'lastseen': rec['end_time']},
             # '$set': {'sensor': rec['sensor']}
         }
-
         [srcspec, dstspec] = self._get_passive_keys(rec)
         added_passive.extend(
             self._http2passive_store_records(
@@ -4745,15 +4802,27 @@ class MongoDBFlow(MongoDB, DBFlow):
         findspec = {
             'time': self.date_round(rec['start_time'])
         }
-
         updatespec = {
             '$addToSet': {
                 'flows': {'$each': added_flows},
                 'hosts': {'$each': added_passive}
             }
         }
-
         timescale_bulk.find(findspec).upsert().update(updatespec)
+
+    def any2flow(self, bulks, name, rec):
+        # Convert addr
+        rec['src_addr_0'], rec['src_addr_1'] = self.ip2internal(rec['src'])
+        rec['dst_addr_0'], rec['dst_addr_1'] = self.ip2internal(rec['dst'])
+        # Insert in flows
+        added_flows = self._any2flow(
+            bulks[self.column_flow], rec, flow.META_DESC[name])
+        # Insert in passive
+        passive_inserter = self.passive_inserters[name]
+        added_passive = passive_inserter(bulks[self.column_passive], rec)
+        # Update timescales
+        self._conn2timescales(bulks[self.column_timescale], rec,
+                              added_flows, added_passive)
 
     def conn2flow(self, bulks, rec):
         """
@@ -4763,30 +4832,6 @@ class MongoDBFlow(MongoDB, DBFlow):
         rec['dst_addr_0'], rec['dst_addr_1'] = self.ip2internal(rec['dst'])
         added_flows = self._conn2flow(bulks[self.column_flow], rec)
         added_passive = self._conn2passive(bulks[self.column_passive], rec)
-        self._conn2timescales(bulks[self.column_timescale], rec,
-                              added_flows, added_passive)
-
-    def dns2flow(self, bulks, rec):
-        """
-        Take a parsed dns.log line entry and add it to bulks
-        """
-        rec['src_addr_0'], rec['src_addr_1'] = self.ip2internal(rec['src'])
-        rec['dst_addr_0'], rec['dst_addr_1'] = self.ip2internal(rec['dst'])
-        added_flows = self._any2flow(
-            bulks[self.column_flow], rec, flow.META_DESC['dns'])
-        added_passive = self._dns2passive(bulks[self.column_passive], rec)
-        self._conn2timescales(bulks[self.column_timescale], rec,
-                              added_flows, added_passive)
-
-    def http2flow(self, bulks, rec):
-        """
-        Take a parsed dns.log line entry and add it to bulks
-        """
-        rec['src_addr_0'], rec['src_addr_1'] = self.ip2internal(rec['src'])
-        rec['dst_addr_0'], rec['dst_addr_1'] = self.ip2internal(rec['dst'])
-        added_flows = self._any2flow(
-            bulks[self.column_flow], rec, flow.META_DESC['http'])
-        added_passive = self._http2passive(bulks[self.column_passive], rec)
         self._conn2timescales(bulks[self.column_timescale], rec,
                               added_flows, added_passive)
 
