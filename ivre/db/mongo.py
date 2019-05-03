@@ -4569,23 +4569,28 @@ class MongoDBFlow(MongoDB, DBFlow):
                                              'dst_port', rec['dport'])
             self._add_or_update_dict_in_dict(updatespec, '$addToSet',
                                              'src_ports', rec['sport'])
-
+        elif rec['proto'] == 'icmp':
+            findspec['type'] = rec['type']
+            self._add_or_update_dict_in_dict(updatespec, '$addToSet',
+                                             'codes', rec['code'])
         flow_bulk.find(findspec).upsert().update(updatespec)
         return [findspec]
 
-    def _any2flow(self, flow_bulk, rec, meta_fields):
+    def _any2flow(self, flow_bulk, rec, name):
         """
         Take a parsed *.log line entry and appropriate meta fields
         in order to add it to flow bulk
         """
         findspec = self._get_flow_key(rec)
+        meta_fields = flow.META_DESC[name]
         meta_dict = {}
         for field, key in meta_fields.items():
             meta_dict[field] = rec[field] if key is None else rec[key]
         updatespec = {
             '$min': {'firstseen': rec['start_time']},
             '$max': {'lastseen': rec['end_time']},
-            '$addToSet': {'meta': meta_dict},  # TODO : should be optionnal
+            # TODO : should be optionnal
+            '$addToSet': {'meta.%s' % name:  meta_dict},
             '$inc': {'count': 1}
         }
 
@@ -4816,7 +4821,7 @@ class MongoDBFlow(MongoDB, DBFlow):
         rec['dst_addr_0'], rec['dst_addr_1'] = self.ip2internal(rec['dst'])
         # Insert in flows
         added_flows = self._any2flow(
-            bulks[self.column_flow], rec, flow.META_DESC[name])
+            bulks[self.column_flow], rec, name)
         # Insert in passive
         passive_inserter = self.passive_inserters[name]
         added_passive = passive_inserter(bulks[self.column_passive], rec)
@@ -4911,33 +4916,44 @@ class MongoDBFlow(MongoDB, DBFlow):
         return {
             "id": addr,
             "label": addr,
-            "labels": ["TODO"],
+            "labels": ["Host"],
             "x": random.random(),
             "y": random.random(),
             "data": []
         }
 
     @classmethod
-    def _edge2json(cls, ref, source, target, proto, dst_port):
-        return {
-            "id": ref,
-            "label": proto + '/' + str(dst_port),
-            "labels": [proto + '/' + str(dst_port)],
-            "source": source,
-            "target": target,
-            "data": []
+    def _edge2json(cls, row):
+        label = (row.get('proto') + '/' + str(row.get('dst_port'))
+                 if row.get('proto') in ['tcp', 'udp']
+                 else row.get('proto') + '/' + str(row.get('type')))
+        res = {
+            "id": str(row.get('_id')),
+            "label": label,
+            "labels": ["Flow"],
+            "source": row.get('src_addr'),
+            "target": row.get('dst_addr'),
+            "data": {
+                "cspkts": row.get('sdpkts'),
+                "csbytes": row.get('sdbytes'),
+                "count": row.get('count'),
+                "scpkts": row.get('dspkts'),
+                "scbytes": row.get('dsbytes'),
+                "proto": row.get('proto'),
+            }
         }
+        if row.get('proto') in ['tcp', 'udp']:
+            res['data']["sports"] = row.get('src_ports')
+        elif row.get('proto') == 'icmp':
+            res['data']['codes'] = row.get('codes')
+        return res
 
     def cursor2json_iter(self, cursor):
         random.seed()
         for row in cursor:
             src_node = self._node2json(row.get('src_addr'))
             dst_node = self._node2json(row.get('dst_addr'))
-            flow_node = self._edge2json(str(row.get('_id')),
-                                        row.get('src_addr'),
-                                        row.get('dst_addr'),
-                                        row.get('proto'),
-                                        row.get('dst_port'))
+            flow_node = self._edge2json(row)
             yield {"src": src_node, "dst": dst_node, "flow": flow_node}
 
     def cursor2json_graph(self, cursor):
@@ -4955,3 +4971,74 @@ class MongoDBFlow(MongoDB, DBFlow):
 
     def to_graph(self, query):
         return self.cursor2json_graph(self.get_flows())
+
+    @classmethod
+    def searchhost(cls, addr, neg=False):
+        """Filters (if `neg` == True, filters out) one particular host
+        (IP address).
+
+        """
+        addr = cls.ip2internal(addr)
+        if neg:
+            return {'$and': [
+                {'$or': [
+                    {'src_addr_0': {'$ne': addr[0]}},
+                    {'src_addr_1': {'$ne': addr[1]}}
+                ]},
+                {'$or': [
+                    {'dst_addr_0': {'$ne': addr[0]}},
+                    {'dst_addr_1': {'$ne': addr[1]}}
+                ]}
+            ]}
+
+        return {'$or': [
+            {'src_addr_0': addr[0], 'src_addr_1': addr[1]},
+            {'dst_addr_0': addr[0], 'dst_addr_1': addr[1]}
+        ]}
+
+    def host_details(self, addr):
+        g = {'in_flows': set(), 'elt': {}, 'out_flows': set(),
+             'clients': set(), 'servers': set()}
+        g['elt']['addr'] = addr
+        flt = self.searchhost(addr)
+        res = self.db[self.columns[self.column_flow]].find(flt)
+        for row in res:
+            internal_addr = self.ip2internal(addr)
+            if (g['elt'].get('firstseen', None) is None or
+                    g['elt'].get('firstseen') > row.get('firstseen')):
+                g['elt']['firstseen'] = row.get('firstseen')
+            if (g['elt'].get('lastseen', None) is None or
+                    g['elt'].get('lastseen') < row.get('lastseen')):
+                g['elt']['lastseen'] = row.get('lastseen')
+            # if it is an outcoming flow
+            if (row.get('src_addr_0') == internal_addr[0] and
+                    row.get('src_addr_1') == internal_addr[1]):
+                g['out_flows'].add((row.get('proto'),
+                                    row.get('dst_port', None)))
+                g['servers'].add(self.internal2ip(
+                    [row.get('dst_addr_0'), row.get('dst_addr_1')]))
+            else:
+                # if it is an incoming flow
+                g['in_flows'].add((row.get('proto'),
+                                   row.get('dst_port', None)))
+                g['clients'].add(self.internal2ip(
+                    [row.get('dst_addr_0'), row.get('src_addr_1')]))
+        g['clients'] = list(g['clients'])
+        g['servers'] = list(g['servers'])
+        g['in_flows'] = list(g['in_flows'])
+        g['out_flows'] = list(g['out_flows'])
+        return g
+
+    def flow_details(self, flow_id):
+        g = {'elt': {}}
+        res = self.db[self.columns[self.column_flow]].find(
+            {'_id': bson.ObjectId(flow_id)})
+        if res.count() != 1:
+            return None
+        row = res[0]
+        g['elt'] = self._edge2json(row)['data']
+        g['elt']['firstseen'] = row.get('firstseen')
+        g['elt']['lastseen'] = row.get('lastseen')
+        if row.get('meta', None):
+            g['meta'] = row.get('meta')
+        return g
