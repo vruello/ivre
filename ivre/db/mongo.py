@@ -4864,8 +4864,8 @@ class MongoDBFlow(MongoDB, DBFlow):
         self.db[self.columns[self.column_flow]].drop()
         self.db[self.columns[self.column_timescale]].drop()
 
-    def get_flows(self):
-        for f in self.find(self.columns[self.column_flow]):
+    def get_flows(self, flt):
+        for f in self.find(self.columns[self.column_flow], flt):
             try:
                 f['src_addr'] = self.internal2ip([f.pop('src_addr_0'),
                                                   f.pop('src_addr_1')])
@@ -4875,8 +4875,9 @@ class MongoDBFlow(MongoDB, DBFlow):
                 pass
             yield f
 
-    def get_flows_count(self):
+    def get_flows_count(self, flt):
         sources = self.db[self.columns[self.column_flow]].aggregate([
+            {'$match': flt},
             {
                 '$group': {
                     '_id': {
@@ -4885,10 +4886,11 @@ class MongoDBFlow(MongoDB, DBFlow):
                     }
                 }
             },
-            {'$count': 'count'}
+            {'$count': 'count'},
         ]).next()['count']
 
         destinations = self.db[self.columns[self.column_flow]].aggregate([
+            {'$match': flt},
             {
                 '$group': {
                     '_id': {
@@ -4897,19 +4899,23 @@ class MongoDBFlow(MongoDB, DBFlow):
                     }
                 }
             },
-            {'$count': 'count'}
+            {'$count': 'count'},
         ]).next()['count']
-
-        f = self.db[self.columns[self.column_flow]].count_documents({})
+        f = self.db[self.columns[self.column_flow]].count_documents(flt)
 
         return {'clients': sources, 'servers': destinations, 'flows': f}
 
     def from_filters(self, filters, limit=None, skip=0, orderby="", mode=None,
                      timeline=False):
-        pass
+        query = flow.Query()
+        for flt_type in ["node", "edge"]:
+            for flt in filters.get("%ss" % flt_type, []):
+                query.add_clause_from_filter(flt, mode=flt_type)
+        return query
 
     def count(self, query):
-        return self.get_flows_count()
+        flt = self.flt_from_query(query)
+        return self.get_flows_count(flt)
 
     @classmethod
     def _node2json(cls, addr):
@@ -4969,32 +4975,116 @@ class MongoDBFlow(MongoDB, DBFlow):
                     done.add(node["id"])
         return g
 
+    def _flt_from_clause_addr(self, clause):
+        addr = self.ip2internal(clause['value'])
+        flt = None
+        if clause['operator'] == '$eq':
+            flt = self.searchhost(addr,
+                                  clause['neg'],
+                                  self.get_clause_attr_type(clause['attr']))
+        return flt
+
+    def _flt_from_clause_any(self, clause):
+        res = {clause['operator']: clause['value']}
+        if clause['neg']:
+            res = {'$not': res}
+        return {clause['attr']: res}
+
+    def get_clause_attr_type(self, attr):
+        splt = attr.split('.', 1)
+        if len(splt) <= 1:
+            return None
+        else:
+            return splt[0]
+
+    def is_addr_clause_attr(self, attr):
+        if attr == 'addr':
+            return True
+        splt = attr.split('.', 1)
+        if len(splt) <= 1:
+            return False
+        return splt[0] in ['src', 'dst'] and splt[1] == 'addr'
+
+    def flt_from_clause(self, clause):
+        operators = {
+            ":": "$eq",
+            "=": "$eq",
+            "==": "$eq",
+            "!=": "$ne",
+            "<": "$lt",
+            "<=": "$lte",
+            ">": "$gt",
+            ">=": "$gte",
+            "=~": "$regex",
+        }
+        if clause['array_mode'] is None and clause['len_mode'] is False:
+            if clause['operator'] is None:
+                return {clause['attr']: {'$exists': not clause['neg']}}
+            else:
+                clause['operator'] = operators[clause['operator']]
+                if self.is_addr_clause_attr(clause['attr']):
+                    res = self._flt_from_clause_addr(clause)
+                else:
+                    res = self._flt_from_clause_any(clause)
+                return res
+        else:
+            return None
+
+    def flt_from_query(self, query):
+        clauses = query.clauses
+        flt = {}
+        and_clauses = []
+        for and_clause in clauses:
+            or_clauses = []
+            for or_clause in and_clause:
+                or_clauses.append(self.flt_from_clause(or_clause))
+            if len(or_clauses) > 1:
+                and_clauses.append({'$or': or_clauses})
+            elif len(or_clauses) == 1:
+                and_clauses.append(or_clauses[0])
+        if len(and_clauses) > 1:
+            flt = {'$and': and_clauses}
+        elif len(and_clauses) == 1:
+            flt = and_clauses[0]
+        return flt
+
     def to_graph(self, query):
-        return self.cursor2json_graph(self.get_flows())
+        flt = self.flt_from_query(query)
+        return self.cursor2json_graph(self.get_flows(flt))
 
     @classmethod
-    def searchhost(cls, addr, neg=False):
+    def searchhost(cls, addr, neg=False, hosttype=None):
         """Filters (if `neg` == True, filters out) one particular host
         (IP address).
 
         """
         addr = cls.ip2internal(addr)
-        if neg:
-            return {'$and': [
-                {'$or': [
-                    {'src_addr_0': {'$ne': addr[0]}},
-                    {'src_addr_1': {'$ne': addr[1]}}
-                ]},
-                {'$or': [
-                    {'dst_addr_0': {'$ne': addr[0]}},
-                    {'dst_addr_1': {'$ne': addr[1]}}
+        if hosttype is None or hosttype not in ['src', 'dst']:
+            if neg:
+                return {'$and': [
+                    {'$or': [
+                        {'src_addr_0': {'$ne': addr[0]}},
+                        {'src_addr_1': {'$ne': addr[1]}}
+                    ]},
+                    {'$or': [
+                        {'dst_addr_0': {'$ne': addr[0]}},
+                        {'dst_addr_1': {'$ne': addr[1]}}
+                    ]}
                 ]}
-            ]}
 
-        return {'$or': [
-            {'src_addr_0': addr[0], 'src_addr_1': addr[1]},
-            {'dst_addr_0': addr[0], 'dst_addr_1': addr[1]}
-        ]}
+            return {'$or': [
+                {'src_addr_0': addr[0], 'src_addr_1': addr[1]},
+                {'dst_addr_0': addr[0], 'dst_addr_1': addr[1]}
+            ]}
+        else:
+            if neg:
+                return {'$or': [
+                    {'%s_addr_0' % hosttype: {'$ne': addr[0]}},
+                    {'%s_addr_1' % hosttype: {'$ne': addr[1]}}
+                ]}
+
+            return {'%s_addr_0' % hosttype: addr[0],
+                    '%s_addr_1' % hosttype: addr[1]}
 
     def host_details(self, addr):
         g = {'in_flows': set(), 'elt': {}, 'out_flows': set(),
