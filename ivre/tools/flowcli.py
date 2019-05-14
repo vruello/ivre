@@ -146,7 +146,7 @@ def main():
         db.flow.ensure_indexes()
         sys.exit(0)
     # FIXME : Temporary print every flows
-    for flow in db.flow.get_flows():
+    for flow in db.flow.get_flows({}):
         display_rec(flow)
     sys.exit(0)
 

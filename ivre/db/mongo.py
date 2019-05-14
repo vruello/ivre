@@ -687,16 +687,18 @@ want to do something special here, e.g., mix with other records.
                 {"$exists": False} if version is None else version}
 
     @classmethod
-    def searchhost(cls, addr, neg=False):
+    def searchhost(cls, addr, neg=False, prefix=''):
         """Filters (if `neg` == True, filters out) one particular host
         (IP address).
 
         """
         addr = cls.ip2internal(addr)
+        addr_0 = "%saddr_0" % prefix
+        addr_1 = "%saddr_1" % prefix
         if neg:
-            return {'$or': [{'addr_0': {'$ne': addr[0]}},
-                            {'addr_1': {'$ne': addr[1]}}]}
-        return {'addr_0': addr[0], 'addr_1': addr[1]}
+            return {'$or': [{addr_0: {'$ne': addr[0]}},
+                            {addr_1: {'$ne': addr[1]}}]}
+        return {addr_0: addr[0], addr_1: addr[1]}
 
     @classmethod
     def searchhosts(cls, hosts, neg=False):
@@ -704,28 +706,30 @@ want to do something special here, e.g., mix with other records.
                 [cls.searchhost(host, neg=neg) for host in hosts]}
 
     @classmethod
-    def searchrange(cls, start, stop, neg=False):
+    def searchrange(cls, start, stop, neg=False, prefix=''):
         """Filters (if `neg` == True, filters out) one particular IP
         address range.
 
         """
         start = cls.ip2internal(start)
         stop = cls.ip2internal(stop)
+        addr_0 = "%saddr_0" % prefix
+        addr_1 = "%saddr_1" % prefix
         if neg:
             return {'$or': [
-                {'addr_0': start[0], 'addr_1': {'$lt': start[1]}},
-                {'addr_0': {'$lt': start[0]}},
-                {'addr_0': stop[0], 'addr_1': {'$gt': stop[1]}},
-                {'addr_0': {'$gt': stop[0]}},
+                {addr_0: start[0], addr_1: {'$lt': start[1]}},
+                {addr_0: {'$lt': start[0]}},
+                {addr_0: stop[0], addr_1: {'$gt': stop[1]}},
+                {addr_0: {'$gt': stop[0]}},
             ]}
         if start[0] == stop[0]:
-            return {'addr_0': start[0], 'addr_1': {'$gte': start[1],
-                                                   '$lte': stop[1]}}
+            return {addr_0: start[0], addr_1: {'$gte': start[1],
+                                               '$lte': stop[1]}}
         return {'$and': [
-            {'$or': [{'addr_0': start[0], 'addr_1': {'$gte': start[1]}},
-                     {'addr_0': {'$gt': start[0]}}]},
-            {'$or': [{'addr_0': stop[0], 'addr_1': {'$lte': stop[1]}},
-                     {'addr_0': {'$lt': stop[0]}}]},
+            {'$or': [{addr_0: start[0], addr_1: {'$gte': start[1]}},
+                     {addr_0: {'$gt': start[0]}}]},
+            {'$or': [{addr_0: stop[0], addr_1: {'$lte': stop[1]}},
+                     {addr_0: {'$lt': stop[0]}}]},
         ]}
 
     @staticmethod
@@ -4491,6 +4495,11 @@ class MongoDBFlow(MongoDB, DBFlow):
     count_passive = 0
     count_timescale = 0
 
+    needunwind = [
+        'src_ports',
+        'meta.*',
+    ]
+
     def __init__(self, host, dbname, colname_flows="flows",
                  colname_passive="passive", colname_timescales="timescales",
                  **kargs):
@@ -4976,36 +4985,118 @@ class MongoDBFlow(MongoDB, DBFlow):
         return g
 
     def _flt_from_clause_addr(self, clause):
-        addr = self.ip2internal(clause['value'])
+        """
+        Return a filter direct from the given clause which deals
+        with addresses. clause['attr'] should be addr, src.addr or dst.addr
+        """
         flt = None
+        if clause['operator'] == '$ne':
+            clause['operator'] = '$eq'
+            clause['neg'] = not clause['neg']
         if clause['operator'] == '$eq':
-            flt = self.searchhost(addr,
-                                  clause['neg'],
-                                  self.get_clause_attr_type(clause['attr']))
+            flt = self.search_flow_host(clause['value'],
+                                        clause['neg'],
+                                        self.get_clause_attr_type(
+                                            clause['attr']))
+        elif clause['operator'] == '$regex':
+            flt = self.search_flow_net(clause['value'],
+                                       clause['neg'],
+                                       self.get_clause_attr_type(
+                                           clause['attr']))
         return flt
 
+    def get_largest_array_attr(self, attr):
+        """
+        Returns (largest array attribute, remaining attributes) where the
+        largest array attribute is the largest attribute stored in
+        self.needunwind which matches with the given attr. Two attributes match
+        with each other if they share the same root.
+        If no array attribute can be found, returns (None, attr)
+        Example: a.b.c matches with a.b and a
+        The star character stands for any "branch", so that
+        a.b.c matches with a.*.c
+        """
+        splt_attr = attr.split('.')
+        for suffix_size in xrange(len(splt_attr)):
+            for unwind_attr in self.needunwind:
+                splt_unwind_attr = unwind_attr.split('.')
+                # if attributes don't have the same number of branches, they
+                # must be different
+                if len(splt_unwind_attr) != len(splt_attr) - suffix_size:
+                    continue
+                # compare branches one by one starting by the end
+                ok = True
+                for i in xrange(len(splt_attr) - suffix_size - 1, -1, -1):
+                    if (splt_unwind_attr[i] != splt_attr[i] and
+                            splt_unwind_attr[i] != '*'):
+                        ok = False
+                if ok:
+                    split_size = len(splt_attr) - suffix_size
+                    return (".".join(splt_attr[:split_size]),
+                            ".".join(splt_attr[split_size:]))
+        return (None, attr)
+
+    def _flt_neg_op(self, op):
+        """
+        Return the opposite of the given operator if it exists,
+        None otherwise
+        """
+        neg_op = {
+            '$eq': '$ne',
+            '$ne': '$eq',
+            '$lt': '$gte',
+            '$gte': '$lt',
+            '$lte': '$gt',
+            '$gt': '$lte'
+        }
+        return neg_op[op] if op in neg_op else None
+
     def _flt_from_clause_any(self, clause):
-        res = {clause['operator']: clause['value']}
+        """
+        Return a filter dict from the given clause that does not deal
+        with addresses (see _flt_from_clause_addr)
+        """
+        add_operator = True
+        # If the value is a regex, we need to compile it
+        # This is compulsory to enable regex negation
+        if clause['operator'] == '$regex':
+            clause['value'] = re.compile(clause['value'])
+            add_operator = False
+        add_not = False
+        # When neg is True, use the opposite operator
+        # if it exists, add a $not prefix otherwise
         if clause['neg']:
+            neg_op = self._flt_neg_op(clause['operator'])
+            if neg_op is not None:
+                clause['operator'] = neg_op
+            else:
+                add_not = True
+        res = clause['value']
+        if add_operator:
+            res = {clause['operator']: res}
+        if add_not:
             res = {'$not': res}
-        return {clause['attr']: res}
+        return {clause['attr']: res} if clause['attr'] is not None else res
 
     def get_clause_attr_type(self, attr):
+        """
+        Return the first prefix of the given attr, None if there is only
+        one branch.
+        Examples:
+        src.addr -> src
+        dst.addr.port.babar -> dst
+        addr -> None
+        """
         splt = attr.split('.', 1)
         if len(splt) <= 1:
             return None
         else:
             return splt[0]
 
-    def is_addr_clause_attr(self, attr):
-        if attr == 'addr':
-            return True
-        splt = attr.split('.', 1)
-        if len(splt) <= 1:
-            return False
-        return splt[0] in ['src', 'dst'] and splt[1] == 'addr'
-
     def flt_from_clause(self, clause):
+        """
+        Return a MongoDB filter from a clause
+        """
         operators = {
             ":": "$eq",
             "=": "$eq",
@@ -5022,15 +5113,97 @@ class MongoDBFlow(MongoDB, DBFlow):
                 return {clause['attr']: {'$exists': not clause['neg']}}
             else:
                 clause['operator'] = operators[clause['operator']]
-                if self.is_addr_clause_attr(clause['attr']):
+                if clause['attr'] in ['addr', 'src.addr', 'dst.addr']:
                     res = self._flt_from_clause_addr(clause)
                 else:
                     res = self._flt_from_clause_any(clause)
                 return res
+        elif clause['array_mode'] is not None:
+            if clause['operator'] is None:
+                raise ValueError("Queries must have an operator in array mode")
+            if clause['array_mode'] == 'ANY':
+                # Mongo performs the "ANY" operation by default
+                clause['array_mode'] = None
+                return self.flt_from_clause(clause)
+            elif clause['array_mode'] == 'ALL':
+                # Getting entries where every elements of array A match the
+                # predicate P is equivalent to get entries where there are NO
+                # element of array A which do NOT match the predicate P
+                # Remarks:
+                # 1. We need make sure that the attribute exists in every
+                # entries that we get.
+                # 2. In case the criteria is not directly linked to the array
+                # values (in other words when array values are dictionnaries),
+                # we must use $elemMatch on the array attribute.
+                attr = clause['attr']
+                array_attr, value_attr = self.get_largest_array_attr(
+                    clause['attr'])
+                if array_attr is None:
+                    raise ValueError("%s is not a valid array attribute"
+                                     % clause['attr'])
+                clause['operator'] = operators[clause['operator']]
+                clause['neg'] = not clause['neg']
+                clause['attr'] = value_attr if value_attr != '' else array_attr
+                res = self._flt_from_clause_any(clause)
+                if value_attr != '':
+                    # Array values are dictionnaries
+                    return {"$nor": [
+                        {array_attr: {"$elemMatch": res}},
+                        {attr: {"$exists": False}}
+                    ]}
+                else:
+                    return {"$nor": [
+                        res,
+                        {attr: {'$exists': False}}
+                    ]}
+            elif clause['array_mode'] == 'NONE':
+                # it is equivalent to NOT(ANY)
+                clause['neg'] = not clause['neg']
+                clause['array_mode'] = 'ANY'
+                return self.flt_from_clause(clause)
+            elif clause['array_mode'] == 'ONE':
+                # FIXME
+                # is it relevant ?
+                raise NotImplementedError
+            else:
+                raise NotImplementedError
         else:
-            return None
+            # len_mode = True
+            if clause['operator'] is None:
+                raise ValueError("Queries must have an operator in len mode")
+
+            clause['operator'] = operators[clause['operator']]
+            clause['value'] = int(clause['value'])
+            if clause['operator'] == '$regex':
+                raise ValueError("Regex are not supported in length mode")
+
+            op = (clause['operator'] if not clause['neg']
+                  else self._flt_neg_op(clause['operator']))
+            if op in ['$eq', '$ne']:
+                res = {'$size': clause['value']}
+                if op == '$ne':
+                    res = {'$not': res}
+                return {clause['attr']: res}
+
+            # MongoDB does not allow to add a comparison operator with $size
+            # We can use the $exists operator on the n-th element of an array
+            # to determine if it has at least n elements.
+            # In case of '<' or '<=' comparison, we need to enforce the
+            # existance of the attribute.
+
+            # Assign to each operator a couple (value offset, existance)
+            op_values = {
+                '$lt': (-1, False), '$lte': (0, False),
+                '$gt': (0, True), '$gte': (-1, True)}
+            return {
+                "%s.%d" % (clause['attr'], clause['value'] + op_values[op][0]):
+                    {'$exists': op_values[op][1]},
+                clause['attr']: {'$exists': True}}
 
     def flt_from_query(self, query):
+        """
+        Return a MongoDB filter from the given query object
+        """
         clauses = query.clauses
         flt = {}
         and_clauses = []
@@ -5053,44 +5226,43 @@ class MongoDBFlow(MongoDB, DBFlow):
         return self.cursor2json_graph(self.get_flows(flt))
 
     @classmethod
-    def searchhost(cls, addr, neg=False, hosttype=None):
-        """Filters (if `neg` == True, filters out) one particular host
-        (IP address).
-
+    def search_flow_net(cls, net, neg=False, prefix=''):
         """
-        addr = cls.ip2internal(addr)
-        if hosttype is None or hosttype not in ['src', 'dst']:
-            if neg:
-                return {'$and': [
-                    {'$or': [
-                        {'src_addr_0': {'$ne': addr[0]}},
-                        {'src_addr_1': {'$ne': addr[1]}}
-                    ]},
-                    {'$or': [
-                        {'dst_addr_0': {'$ne': addr[0]}},
-                        {'dst_addr_1': {'$ne': addr[1]}}
-                    ]}
-                ]}
-
-            return {'$or': [
-                {'src_addr_0': addr[0], 'src_addr_1': addr[1]},
-                {'dst_addr_0': addr[0], 'dst_addr_1': addr[1]}
-            ]}
+        Return a MongoDB filter matching the given CIDR notation.
+        If prefix is {src,dst}, it matches only the {src,dst} addr
+        """
+        if prefix not in ['src', 'dst']:
+            res = [
+                cls.searchnet(net, neg=neg, prefix='src_'),
+                cls.searchnet(net, neg=neg, prefix='dst_')
+            ]
+            op = '$and' if neg else '$or'
+            return {op: res}
         else:
-            if neg:
-                return {'$or': [
-                    {'%s_addr_0' % hosttype: {'$ne': addr[0]}},
-                    {'%s_addr_1' % hosttype: {'$ne': addr[1]}}
-                ]}
+            return cls.searchnet(net, neg=neg, prefix=prefix + '_')
 
-            return {'%s_addr_0' % hosttype: addr[0],
-                    '%s_addr_1' % hosttype: addr[1]}
+    @classmethod
+    def search_flow_host(cls, addr, neg=False, prefix=''):
+        """
+        Return a MongoDB filter matching the given IP address.
+        If prefix is {src,dst}, it matches only the {src,dst} address.
+        """
+        addr = cls.ip2internal(addr)  # compute internal addr once and for all
+        if prefix not in ['src', 'dst']:
+            res = [
+                cls.searchhost(addr, neg=neg, prefix='src_'),
+                cls.searchhost(addr, neg=neg, prefix='dst_')
+            ]
+            op = '$and' if neg else '$or'
+            return {op: res}
+        else:
+            return cls.searchhost(addr, neg=neg, prefix=prefix + '_')
 
     def host_details(self, addr):
         g = {'in_flows': set(), 'elt': {}, 'out_flows': set(),
              'clients': set(), 'servers': set()}
         g['elt']['addr'] = addr
-        flt = self.searchhost(addr)
+        flt = self.search_flow_host(addr)
         res = self.db[self.columns[self.column_flow]].find(flt)
         for row in res:
             internal_addr = self.ip2internal(addr)
@@ -5112,7 +5284,7 @@ class MongoDBFlow(MongoDB, DBFlow):
                 g['in_flows'].add((row.get('proto'),
                                    row.get('dst_port', None)))
                 g['clients'].add(self.internal2ip(
-                    [row.get('dst_addr_0'), row.get('src_addr_1')]))
+                    [row.get('src_addr_0'), row.get('src_addr_1')]))
         g['clients'] = list(g['clients'])
         g['servers'] = list(g['servers'])
         g['in_flows'] = list(g['in_flows'])

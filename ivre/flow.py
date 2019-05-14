@@ -85,7 +85,8 @@ def ssh2passive_keys(rec, is_server):
 
 
 class Query(object):
-    operators = [':', '=', '==', '!=', '<', '<=', '>', '>=', '=~']
+    # The order matters because regex pipe is ungreedy
+    operators = [':', '==', '=~', '=', '!=', '<=', '<', '>=', '>']
     operators_re = re.compile('|'.join(re.escape(x) for x in operators))
     identifier = re.compile('^[a-zA-Z][a-zA-Z0-9_]*$')
     or_re = re.compile('^OR|\\|\\|$')
