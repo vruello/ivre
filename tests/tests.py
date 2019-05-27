@@ -529,12 +529,12 @@ which `predicate()` is True, given `webflt`.
             if fname.endswith('.xml') or fname.endswith('.json') or
             fname.endswith('.xml.bz2') or fname.endswith('.json.bz2')
         )
-        cls.pcap_files = (
+        cls.pcap_files = [
             os.path.join(root, fname)
             for root, _, files in os.walk(SAMPLES)
             for fname in files
             if fname.endswith('.pcap')
-        )
+        ]
         cls.children = []
 
     @classmethod
@@ -2198,10 +2198,6 @@ which `predicate()` is True, given `webflt`.
     def test_60_flow(self):
 
         # Init DB
-        res, out, err = RUN(["ivre", "flowcli", "--count"])
-        self.assertEqual(res, 0)
-        self.assertEqual(out, b"0 clients\n0 servers\n0 flows\n")
-        self.assertTrue(not err)
         res, out, err = RUN(["ivre", "flowcli", "--init"],
                             stdin=open(os.devnull))
         self.assertEqual(res, 0)
@@ -2211,7 +2207,6 @@ which `predicate()` is True, given `webflt`.
         self.assertEqual(res, 0)
         self.assertEqual(out, b"0 clients\n0 servers\n0 flows\n")
         self.assertTrue(not err)
-
         for pcapfname in self.pcap_files:
             # Only Python 3.2+
             # with tempfile.TemporaryDirectory() as tmpdir:
@@ -2230,6 +2225,7 @@ which `predicate()` is True, given `webflt`.
                 for fname in fnames
                 if fname.endswith('.log')
             ])
+
             self.assertEqual(res, 0)
             self.assertTrue(not out)
             ivre.utils.cleandir(tmpdir)
@@ -3644,7 +3640,7 @@ TESTS = set(["10_data", "30_nmap", "40_passive", "50_view", "53_nmap_delete",
 
 DATABASES = {
     # **excluded** tests
-    "mongo": ["60_flow", "utils"],
+    "mongo": ["utils"],
     "postgres": ["60_flow", "scans", "utils"],
     "sqlite": ["30_nmap", "53_nmap_delete", "50_view", "60_flow", "scans",
                "utils"],
