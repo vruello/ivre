@@ -4894,7 +4894,7 @@ class MongoDBFlow(MongoDB, DBFlow):
     def get_flows_count(self, flt):
         sources = 0
         destinations = 0
-        flows = self.db[self.columns[self.column_flow]].count_documents(flt)
+        flows = self.db[self.columns[self.column_flow]].count(flt)
         if flows > 0:
             sources = self.db[self.columns[self.column_flow]].aggregate([
                 {'$match': flt},
@@ -4903,10 +4903,13 @@ class MongoDBFlow(MongoDB, DBFlow):
                         '_id': {
                             'src_addr_0': '$src_addr_0',
                             'src_addr_1': '$src_addr_1'
-                        }
+                        },
                     }
                 },
-                {'$count': 'count'},
+                {'$group': {
+                    '_id': None,
+                    'count': {'$sum': 1}
+                }}
             ]).next()['count']
 
             destinations = self.db[self.columns[self.column_flow]].aggregate([
@@ -4916,10 +4919,13 @@ class MongoDBFlow(MongoDB, DBFlow):
                         '_id': {
                             'dst_addr_0': '$dst_addr_0',
                             'dst_addr_1': '$dst_addr_1'
-                        }
+                        },
                     }
                 },
-                {'$count': 'count'},
+                {'$group': {
+                    '_id': None,
+                    'count': {'$sum': 1}
+                }}
             ]).next()['count']
 
         return {'clients': sources, 'servers': destinations, 'flows': flows}

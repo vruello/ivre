@@ -44,7 +44,7 @@ from py2neo.types import remote
 from ivre.db import DBFlow
 from ivre import config
 from ivre import utils
-
+from ivre import flow
 
 http.socket_timeout = 3600
 # We are aware of that, let's just ignore it for now
@@ -268,8 +268,9 @@ class Neo4jDB(DBFlow):
             val = utils.datetime2timestamp(val)
         return val
 
-
-class Query(object):
+# FIXME this class is a little hack to keep the logic of the Neo4j backend
+# unchanged. It should be updated to use flow.Query.
+class Neo4jFlowQuery(flow.Query):
     operators = {
         ":": "=",
         "=": "=",
@@ -281,9 +282,9 @@ class Query(object):
         ">=": ">=",
         "=~": "=~",
     }
-    operators_re = re.compile('|'.join(re.escape(x) for x in operators))
-    identifier = re.compile('^[a-zA-Z][a-zA-Z0-9_]*$')
-    or_re = re.compile('^OR|\\|\\|$')
+    # TODO attributes is a dictionnary to translate "query" attributes in
+    # "backend" attributes.
+    attributes = []
 
     def __init__(self, src=None, link=None, dst=None, ret=None,
                  limit=None, skip=None, **params):
@@ -360,6 +361,10 @@ class Query(object):
             self.clauses.extend(clause)
         return self
 
+    """
+    This should be remove and flow.Query._add_clause_from_filter should be
+    used instead.
+    """
     def _add_clause_from_filter(self, flt, mode="node"):
         """Returns a WHERE clause (tuple (query, parameters)) from a single
         filter (no OR).
@@ -514,6 +519,10 @@ class Query(object):
                 current.append(subflt)
         yield " ".join(current)
 
+    """
+    This should be remove and flow.Query.add_clause_from_filter should be
+    used instead.
+    """
     def add_clause_from_filter(self, flt, mode="node"):
         """ADD a WHERE clause from a node filter.
 
@@ -1013,7 +1022,6 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
         for flt_type in ["node", "edge"]:
             for flt in queries.get("%ss" % flt_type, []):
                 query.add_clause_from_filter(flt, mode=flt_type)
-
         if mode == "talk_map":
             query.add_clause('WITH src, dst, COUNT(link) AS t, '
                              'COLLECT(DISTINCT LABELS(link)) AS labels, '
@@ -1154,8 +1162,8 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
         """Transforms a neo4j returned by executing a query into an iterator of
         {src: <dict>, flow: <dict>, dst: <dict>}.
         """
-        for src, flow, dst in cursor:
-            for rec in [src, flow, dst]:
+        for src, flw, dst in cursor:
+            for rec in [src, flw, dst]:
                 cls._cleanup_record(rec)
             src_props = cls._get_props(src["elt"], src.get("meta"))
             src_ref = cls._get_ref(src["elt"], src_props)
@@ -1167,11 +1175,11 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
             dst_labels = cls._get_labels(dst["elt"], dst_props)
             dst_node = cls._node2json(dst_ref, dst_labels, dst_props)
 
-            flow_props = cls._get_props(flow["elt"], flow.get("meta"))
+            flow_props = cls._get_props(flw["elt"], flw.get("meta"))
             flow_props["addr_src"] = src_props.get('addr', None)
             flow_props["addr_dst"] = dst_props.get('addr', None)
-            flow_ref = cls._get_ref(flow["elt"], flow_props)
-            flow_labels = cls._get_labels(flow["elt"], flow_props)
+            flow_ref = cls._get_ref(flw["elt"], flow_props)
+            flow_labels = cls._get_labels(flw["elt"], flow_props)
             flow_node = cls._edge2json(flow_ref, src_ref, dst_ref, flow_labels,
                                        flow_props)
             yield {"src": src_node, "dst": dst_node, "flow": flow_node}
