@@ -116,6 +116,9 @@ class Query(object):
                   'attr': None, 'operator': None, 'value': None}
         if not flt:
             return None
+        # Ignore labels (neo4j compatibility)
+        if flt[0] == '#':
+            return None
         if flt[0] in "-!~":
             clause['neg'] = True
             flt = flt[1:]
@@ -151,7 +154,8 @@ class Query(object):
         for subflt in self._split_filter_or(flt):
             if subflt:
                 subclause = self._add_clause_from_filter(subflt)
-                clauses.append(subclause)
+                if subclause is not None:
+                    clauses.append(subclause)
         return self.add_clause(clauses)
 
     def add_clause(self, clause):

@@ -4489,11 +4489,9 @@ scan object on success, and raises a LockError on failure.
 class MongoDBFlow(MongoDB, DBFlow):
     column_flow = 0
     column_passive = 1
-    column_timescale = 2
 
     count_flow = 0
     count_passive = 0
-    count_timescale = 0
 
     needunwind = [
         'src_ports',
@@ -4504,12 +4502,14 @@ class MongoDBFlow(MongoDB, DBFlow):
         'meta.ssh'
     ]
 
-    def __init__(self, host, dbname, colname_flows="flows",
-                 colname_passive="passive", colname_timescales="timescales",
-                 **kargs):
-        MongoDB.__init__(self, host, dbname, **kargs)
-        DBFlow.__init__(self)
-        self.columns = [colname_flows, colname_passive, colname_timescales]
+    datefields = [
+        'firstseen',
+        'lastseen'
+    ]
+
+    def __init__(self, url):
+        super(MongoDBFlow, self).__init__(url)
+        self.columns = ["flows", "passive"]
         self.passive_inserters = {
             'http': self._http2passive,
             'dns': self._dns2passive,
@@ -4526,9 +4526,8 @@ class MongoDBFlow(MongoDB, DBFlow):
             self.db[self.columns[self.column_flow]]
                 .initialize_unordered_bulk_op(),
             self.db[self.columns[self.column_passive]]
-                .initialize_unordered_bulk_op(),
-            self.db[self.columns[self.column_timescale]]
-                .initialize_unordered_bulk_op()]
+                .initialize_unordered_bulk_op()
+        ]
 
     def _get_flow_key(self, rec):
         key = {
@@ -4559,6 +4558,15 @@ class MongoDBFlow(MongoDB, DBFlow):
             main_dict[main_key] = {}
         main_dict[main_key].update({key: value})
 
+    @classmethod
+    def _get_timeslots(cls, start_time, end_time):
+        times = []
+        time = cls.date_round(start_time)
+        while time <= cls.date_round(end_time):
+            times.append(time)
+            time += datetime.timedelta(seconds=config.FLOW_TIME_PRECISION)
+        return times
+
     def _conn2flow(self, flow_bulk, rec):
         """
         Take a parsed conn.log line entry and add it to flow bulk
@@ -4574,7 +4582,9 @@ class MongoDBFlow(MongoDB, DBFlow):
                 'sdbytes': rec['orig_ip_bytes'],
                 'dsbytes': rec['resp_ip_bytes'],
                 'count': 1
-            }
+            },
+            "$addToSet": {'times': {"$each": self._get_timeslots(
+                rec['start_time'], rec['end_time'])}}
         }
 
         if rec['proto'] in ['udp', 'tcp']:
@@ -4815,19 +4825,6 @@ class MongoDBFlow(MongoDB, DBFlow):
                 flow.HTTP_PASSIVE_RECONTYPES_SERVER, True))
         return added_passive
 
-    def _conn2timescales(self, timescale_bulk, rec, added_flows,
-                         added_passive):
-        findspec = {
-            'time': self.date_round(rec['start_time'])
-        }
-        updatespec = {
-            '$addToSet': {
-                'flows': {'$each': added_flows},
-                'hosts': {'$each': added_passive}
-            }
-        }
-        timescale_bulk.find(findspec).upsert().update(updatespec)
-
     def dns2flow(self, bulks, rec):
         return self.any2flow(bulks, 'dns', rec)
 
@@ -4841,9 +4838,6 @@ class MongoDBFlow(MongoDB, DBFlow):
         # Insert in passive
         passive_inserter = self.passive_inserters[name]
         added_passive = passive_inserter(bulks[self.column_passive], rec)
-        # Update timescales
-        self._conn2timescales(bulks[self.column_timescale], rec,
-                              added_flows, added_passive)
 
     def conn2flow(self, bulks, rec):
         """
@@ -4853,8 +4847,6 @@ class MongoDBFlow(MongoDB, DBFlow):
         rec['dst_addr_0'], rec['dst_addr_1'] = self.ip2internal(rec['dst'])
         added_flows = self._conn2flow(bulks[self.column_flow], rec)
         added_passive = self._conn2passive(bulks[self.column_passive], rec)
-        self._conn2timescales(bulks[self.column_timescale], rec,
-                              added_flows, added_passive)
 
     def bulk_commit(self, bulks):
         for bulk in bulks:
@@ -4878,10 +4870,23 @@ class MongoDBFlow(MongoDB, DBFlow):
 
         """
         self.db[self.columns[self.column_flow]].drop()
-        self.db[self.columns[self.column_timescale]].drop()
 
-    def get_flows(self, flt):
-        for f in self.find(self.columns[self.column_flow], flt):
+    def get_flows(self, flt, skip, limit, orderby):
+        sort = None
+        if orderby == 'dst':
+            sort = [('dst_addr_0', pymongo.ASCENDING),
+                    ('dst_addr_1', pymongo.ASCENDING)]
+        elif orderby == 'src':
+            sort = [('src_addr_0', pymongo.ASCENDING),
+                    ('src_addr_1', pymongo.ASCENDING)]
+        elif orderby == 'flow':
+            sort = [('dst_port', pymongo.ASCENDING),
+                    ('proto', pymongo.ASCENDING)]
+        elif orderby:
+            raise ValueError(
+                    "Unsupported orderby (should be 'src', 'dst' or 'flow')")
+        for f in self.find(self.columns[self.column_flow], flt,
+                limit=limit or 0, skip=skip or 0, sort=sort):
             try:
                 f['src_addr'] = self.internal2ip([f.pop('src_addr_0'),
                                                   f.pop('src_addr_1')])
@@ -5123,18 +5128,31 @@ class MongoDBFlow(MongoDB, DBFlow):
         return self.get_flows_count(flt)
 
     @classmethod
-    def _node2json(cls, addr):
+    def _flow2host(cls, row, prefix):
+        res = {}
+        if prefix == 'src':
+            res['addr'] = row.get('src_addr')
+        elif prefix == 'dst':
+            res['addr'] = row.get('dst_addr')
+        else:
+            raise Exception("prefix must be 'dst' or 'src'")
+        res['firstseen'] = row.get('firstseen')
+        res['lastseen'] = row.get('lastseen')
+        return res
+
+    @classmethod
+    def _node2json(cls, row):
         return {
-            "id": addr,
-            "label": addr,
+            "id": row.get('addr'),
+            "label": row.get('addr'),
             "labels": ["Host"],
             "x": random.random(),
             "y": random.random(),
-            "data": []
+            "data": row
         }
 
     @classmethod
-    def _edge2json(cls, row):
+    def _edge2json_default(cls, row, timeline=False):
         label = (row.get('proto') + '/' + str(row.get('dst_port'))
                  if row.get('proto') in ['tcp', 'udp']
                  else row.get('proto') + '/' + str(row.get('type')))
@@ -5151,33 +5169,100 @@ class MongoDBFlow(MongoDB, DBFlow):
                 "scpkts": row.get('dspkts'),
                 "scbytes": row.get('dsbytes'),
                 "proto": row.get('proto'),
+                "firstseen": row.get('firstseen'),
+                "lastseen": row.get('lastseen'),
+                "__key__": str(row.get('_id')),
             }
         }
+        if timeline:
+            res["data"]["meta"] = {"times": row.get('times')}
         if row.get('proto') in ['tcp', 'udp']:
             res['data']["sports"] = row.get('src_ports')
+            res['data']["dport"] = row.get('dst_port')
         elif row.get('proto') == 'icmp':
             res['data']['codes'] = row.get('codes')
         return res
 
-    def cursor2json_iter(self, cursor):
+    @classmethod
+    def _edge2json_flow_map(cls, row):
+        flow = ()
+        if row.get('proto') in ['udp', 'tcp']:
+            flow = (row.get('proto'), row.get('dst_port'))
+        else:
+            flow = (row.get('proto'), None)
+        res = {
+            "id": str(row.get('_id')),
+            "label": "MERGED_FLOWS",
+            "labels": ["MERGED_FLOWS"],
+            "source": row.get('src_addr'),
+            "target": row.get('dst_addr'),
+            "data": {
+                "count": 1,
+                "flows": [flow]
+            }
+        }
+        return res
+
+    @classmethod
+    def _edge2json_talk_map(cls, row):
+        res = {
+            "id": str(row.get('_id')),
+            "label": "TALK",
+            "labels": ["TALK"],
+            "source": row.get('src_addr'),
+            "target": row.get('dst_addr'),
+            "data": {
+                "count": 1,
+                "flows": ["TALK"]
+            }
+        }
+        return res
+
+    def cursor2json_iter(self, cursor, mode=None, timeline=False):
         random.seed()
         for row in cursor:
-            src_node = self._node2json(row.get('src_addr'))
-            dst_node = self._node2json(row.get('dst_addr'))
-            flow_node = self._edge2json(row)
+            src_node = self._node2json(self._flow2host(row, 'src'))
+            dst_node = self._node2json(self._flow2host(row, 'dst'))
+            flow_node = []
+            if mode == "flow_map":
+                flow_node = self._edge2json_flow_map(row)
+            elif mode == "talk_map":
+                flow_node = self._edge2json_talk_map(row)
+            else:
+                flow_node = self._edge2json_default(row, timeline=timeline)
             yield {"src": src_node, "dst": dst_node, "flow": flow_node}
 
-    def cursor2json_graph(self, cursor):
+    def cursor2json_graph(self, cursor, mode, timeline):
         g = {"nodes": [], "edges": []}
-        done = set()
-
-        for row in self.cursor2json_iter(cursor):
-            for node, typ in ((row["src"], "nodes"),
-                              (row["flow"], "edges"),
-                              (row["dst"], "nodes")):
-                if node["id"] not in done:
-                    g[typ].append(node)
-                    done.add(node["id"])
+        hosts = {}
+        edges = {}
+        for row in self.cursor2json_iter(cursor, mode=mode, timeline=timeline):
+            if mode in ["flow_map", "talk_map"]:
+                flw = row["flow"]
+                if (flw["source"], flw["target"]) in edges:
+                    edge = edges[(flw["source"], flw["target"])]
+                    if mode == "flow_map":
+                        flows = flw["data"]["flows"]
+                        if flows[0] not in edge["data"]["flows"]:
+                            edge["data"]["flows"].append(flows[0])
+                            edge["data"]["count"] += 1
+                else:
+                    edges[(flw["source"], flw["target"])] = flw
+            else:
+                g["edges"].append(row["flow"])
+            for host in (row["src"], row["dst"]):
+                if host["id"] in hosts:
+                    hosts[host["id"]]["data"]["firstseen"] = min(
+                        hosts[host["id"]]["data"]["firstseen"],
+                        host["data"]["firstseen"])
+                    hosts[host["id"]]["data"]["lastseen"] = max(
+                        hosts[host["id"]]["data"]["lastseen"],
+                        host["data"]["lastseen"])
+                else:
+                    hosts[host["id"]] = host
+        g["nodes"] = hosts.values()
+        if mode in ["flow_map", "talk_map"]:
+            g["edges"] = edges.values()
         return g
 
     def _flt_from_clause_addr(self, clause):
@@ -5265,6 +5350,8 @@ class MongoDBFlow(MongoDB, DBFlow):
             else:
                 add_not = True
         res = clause['value']
+        if clause['attr'] in self.datefields:
+            res = datetime.datetime.strptime(res, "%Y-%m-%d %H:%M:%S.%f")
         if add_operator:
             res = {clause['operator']: res}
         if add_not:
@@ -5310,7 +5397,7 @@ class MongoDBFlow(MongoDB, DBFlow):
                     res = self._flt_from_clause_addr(clause)
                 else:
                     res = self._flt_from_clause_any(clause)
-                return res
+            return res
         elif clause['array_mode'] is not None:
             if clause['operator'] is None:
                 raise ValueError("Queries must have an operator in array mode")
@@ -5414,13 +5501,14 @@ class MongoDBFlow(MongoDB, DBFlow):
             flt = and_clauses[0]
         return flt
 
-    def to_graph(self, query):
+    def to_graph(self, query, limit, skip, orderby, mode, timeline):
         flt = self.flt_from_query(query)
-        return self.cursor2json_graph(self.get_flows(flt))
+        return self.cursor2json_graph(self.get_flows(flt, skip, limit, orderby),
+                                      mode, timeline)
 
-    def to_iter(self, query):
+    def to_iter(self, query, limit, skip, orderby):
         flt = self.flt_from_query(query)
-        return self.cursor2json_iter(self.get_flows(flt))
+        return self.cursor2json_iter(self.get_flows(flt, skip, limit, orderby))
 
     @classmethod
     def search_flow_net(cls, net, neg=False, prefix=''):
@@ -5495,7 +5583,7 @@ class MongoDBFlow(MongoDB, DBFlow):
         if res.count() != 1:
             return None
         row = res[0]
-        g['elt'] = self._edge2json(row)['data']
+        g['elt'] = self._edge2json_default(row)['data']
         g['elt']['firstseen'] = row.get('firstseen')
         g['elt']['lastseen'] = row.get('lastseen')
         if row.get('meta', None):

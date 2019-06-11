@@ -750,7 +750,7 @@ ivreWebUi
 
         $scope.query_attr = function(elt, attr, val, bool) {
             var element_type = elt.source === undefined ? "nodes" : "edges";
-            q = "@" + attr + " = " + val
+            q = attr + " = " + val
             if (!bool) {
                 q = "!" + q;
             }
