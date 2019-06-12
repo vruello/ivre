@@ -44,35 +44,6 @@ except ImportError:
 from ivre.db import db
 from ivre import utils
 
-
-def display_rec(rec):
-    print(rec.get('src_addr'), end='')
-    if rec.get('src_ports', None) is not None:
-        src_ports = rec.get('src_ports')
-        if len(src_ports) > 1:
-            print(':[', end='')
-            print(" ".join([str(p) for p in src_ports]), end='')
-            print(']', end=' ')
-        else:
-            print(':%d' % src_ports[0], end=' ')
-    else:
-        print('', end=' ')
-
-    print('--- %s --->' % rec.get('proto'), end=' ')
-
-    print(rec.get('dst_addr'), end='')
-    if rec.get('dst_port', None) is not None:
-        print(':%d' % rec.get('dst_port'), end=' ')
-    else:
-        print('', end=' ')
-    print('\t', end='')
-    print('%s\t' % rec.get('firstseen'), end='')
-    print('%s\t' % rec.get('lastseen'), end='')
-    print('%d\t' % rec.get('count'), end='')
-    print('%d\t%d\t%d\t%d' % (rec.get('sdpkts', 0), rec.get('sdbytes', 0),
-                              rec.get('dspkts', 0), rec.get('dsbytes', 0)))
-
-
 def main():
     parser, _ = utils.create_argparser(__doc__)
     parser.add_argument('--init', '--purgedb', action='store_true',

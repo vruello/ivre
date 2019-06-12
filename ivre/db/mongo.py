@@ -4494,7 +4494,7 @@ class MongoDBFlow(MongoDB, DBFlow):
     count_passive = 0
 
     needunwind = [
-        'src_ports',
+        'sports',
         'codes',
         'meta.dns',
         'meta.dns.answers',
@@ -4539,7 +4539,7 @@ class MongoDBFlow(MongoDB, DBFlow):
             # 'sensor': rec['sensor']
         }
         if rec['proto'] in ['udp', 'tcp']:
-            key['dst_port'] = rec['dport']
+            key['dport'] = rec['dport']
         return key
 
     def _get_passive_keys(self, rec, recontype=None):
@@ -4577,10 +4577,10 @@ class MongoDBFlow(MongoDB, DBFlow):
             '$min': {'firstseen': rec['start_time']},
             '$max': {'lastseen': rec['end_time']},
             '$inc': {
-                'sdpkts': rec['orig_pkts'],
-                'dspkts': rec['resp_pkts'],
-                'sdbytes': rec['orig_ip_bytes'],
-                'dsbytes': rec['resp_ip_bytes'],
+                'cspkts': rec['orig_pkts'],
+                'scpkts': rec['resp_pkts'],
+                'csbytes': rec['orig_ip_bytes'],
+                'scbytes': rec['resp_ip_bytes'],
                 'count': 1
             },
             "$addToSet": {'times': {"$each": self._get_timeslots(
@@ -4589,9 +4589,9 @@ class MongoDBFlow(MongoDB, DBFlow):
 
         if rec['proto'] in ['udp', 'tcp']:
             self._add_or_update_dict_in_dict(updatespec, '$setOnInsert',
-                                             'dst_port', rec['dport'])
+                                             'dport', rec['dport'])
             self._add_or_update_dict_in_dict(updatespec, '$addToSet',
-                                             'src_ports', rec['sport'])
+                                             'sports', rec['sport'])
         elif rec['proto'] == 'icmp':
             findspec['type'] = rec['type']
             self._add_or_update_dict_in_dict(updatespec, '$addToSet',
@@ -4616,9 +4616,6 @@ class MongoDBFlow(MongoDB, DBFlow):
             '$addToSet': {'meta.%s' % name: meta_dict},
             '$inc': {'count': 1}
         }
-
-        self._add_or_update_dict_in_dict(updatespec, '$addToSet',
-                                         'src_ports', rec['sport'])
 
         flow_bulk.find(findspec).upsert().update(updatespec)
         return [findspec]
@@ -4836,8 +4833,9 @@ class MongoDBFlow(MongoDB, DBFlow):
         added_flows = self._any2flow(
             bulks[self.column_flow], rec, name)
         # Insert in passive
-        passive_inserter = self.passive_inserters[name]
-        added_passive = passive_inserter(bulks[self.column_passive], rec)
+        passive_inserter = self.passive_inserters.get(name, None)
+        if passive_inserter is not None:
+            added_passive = passive_inserter(bulks[self.column_passive], rec)
 
     def conn2flow(self, bulks, rec):
         """
@@ -4863,6 +4861,9 @@ class MongoDBFlow(MongoDB, DBFlow):
 
             except BulkWriteError as bwe:
                 print(bwe.details)
+            except pymongo.errors.InvalidOperation:
+                pass
+
 
     def init(self):
         """Initializes the "flows" columns, i.e., drops those columns and
@@ -4880,7 +4881,7 @@ class MongoDBFlow(MongoDB, DBFlow):
             sort = [('src_addr_0', pymongo.ASCENDING),
                     ('src_addr_1', pymongo.ASCENDING)]
         elif orderby == 'flow':
-            sort = [('dst_port', pymongo.ASCENDING),
+            sort = [('dport', pymongo.ASCENDING),
                     ('proto', pymongo.ASCENDING)]
         elif orderby:
             raise ValueError(
@@ -4970,11 +4971,11 @@ class MongoDBFlow(MongoDB, DBFlow):
         # Translation dictionnary for special fields
         special_fields = {'src.addr': ['src_addr_0', 'src_addr_1'],
                           'dst.addr': ['dst_addr_0', 'dst_addr_1'],
-                          'dport': ['dst_port'],
-                          'sport': ['src_ports']}
+                          'dport': ['dport'],
+                          'sport': ['sports']}
         # special fields that are not addresses will be translated again at
         # the end
-        reverse_special_fields = {'dst_port': 'dport', 'src_ports': 'sport'}
+        reverse_special_fields = {'dport': 'dport', 'sports': 'sport'}
 
         # Compute the internal fields
         # internal_fields = [aggr fields, collect_fields, sum_fields]
@@ -5153,7 +5154,7 @@ class MongoDBFlow(MongoDB, DBFlow):
 
     @classmethod
     def _edge2json_default(cls, row, timeline=False):
-        label = (row.get('proto') + '/' + str(row.get('dst_port'))
+        label = (row.get('proto') + '/' + str(row.get('dport'))
                  if row.get('proto') in ['tcp', 'udp']
                  else row.get('proto') + '/' + str(row.get('type')))
         res = {
@@ -5163,31 +5164,34 @@ class MongoDBFlow(MongoDB, DBFlow):
             "source": row.get('src_addr'),
             "target": row.get('dst_addr'),
             "data": {
-                "cspkts": row.get('sdpkts'),
-                "csbytes": row.get('sdbytes'),
+                "cspkts": row.get('cspkts'),
+                "csbytes": row.get('csbytes'),
                 "count": row.get('count'),
-                "scpkts": row.get('dspkts'),
-                "scbytes": row.get('dsbytes'),
+                "scpkts": row.get('scpkts'),
+                "scbytes": row.get('scbytes'),
                 "proto": row.get('proto'),
                 "firstseen": row.get('firstseen'),
                 "lastseen": row.get('lastseen'),
                 "__key__": str(row.get('_id')),
+                "addr_src": row.get('src_addr'),
+                "addr_dst": row.get('dst_addr')
             }
         }
-        if timeline:
+        if timeline and len(row.get('times', [])) > 0:
             res["data"]["meta"] = {"times": row.get('times')}
         if row.get('proto') in ['tcp', 'udp']:
-            res['data']["sports"] = row.get('src_ports')
-            res['data']["dport"] = row.get('dst_port')
+            res['data']["sports"] = row.get('sports')
+            res['data']["dport"] = row.get('dport')
         elif row.get('proto') == 'icmp':
             res['data']['codes'] = row.get('codes')
+            res['data']['type'] = row.get('type')
         return res
 
     @classmethod
     def _edge2json_flow_map(cls, row):
         flow = ()
         if row.get('proto') in ['udp', 'tcp']:
-            flow = (row.get('proto'), row.get('dst_port'))
+            flow = (row.get('proto'), row.get('dport'))
         else:
             flow = (row.get('proto'), None)
         res = {
@@ -5561,13 +5565,13 @@ class MongoDBFlow(MongoDB, DBFlow):
             if (row.get('src_addr_0') == internal_addr[0] and
                     row.get('src_addr_1') == internal_addr[1]):
                 g['out_flows'].add((row.get('proto'),
-                                    row.get('dst_port', None)))
+                                    row.get('dport', None)))
                 g['servers'].add(self.internal2ip(
                     [row.get('dst_addr_0'), row.get('dst_addr_1')]))
             else:
                 # if it is an incoming flow
                 g['in_flows'].add((row.get('proto'),
-                                   row.get('dst_port', None)))
+                                   row.get('dport', None)))
                 g['clients'].add(self.internal2ip(
                     [row.get('src_addr_0'), row.get('src_addr_1')]))
         g['clients'] = list(g['clients'])
@@ -5589,3 +5593,6 @@ class MongoDBFlow(MongoDB, DBFlow):
         if row.get('meta', None):
             g['meta'] = row.get('meta')
         return g
+
+    def cleanup_flows(self):
+        pass
