@@ -1244,7 +1244,7 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
         res = self.cursor2json_graph(self.run(query))
         return res
 
-    def to_iter(self, query):
+    def to_iter(self, query, limit=None, skip=None, orderby=None):
         return self.cursor2json_iter(self.run(query))
 
     def count(self, query):

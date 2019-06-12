@@ -55,6 +55,15 @@ META_DESC = {
         'client': None, 'server': None, 'cipher_alg': None, 'mac_alg': None,
         'compression_alg': None, 'kex_alg': None, 'host_key_alg': None,
         'host_key': None
+    },
+    'sip': {
+        'dport': None, 'method': None, "uri": None,
+        "request_from": None, "request_to": None, "response_from": None,
+        "response_to": None, "reply_to": None, "user_agent": None,
+        "status_code": None, "status_msg": None, "warning": None
+    },
+    'modbus': {
+        'name': 'func', 'exception': None
     }
 }
 
