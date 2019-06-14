@@ -52,9 +52,10 @@ def ssh2flow(bulk, rec):
 
 
 def sip2flow(bulk, rec):
+    # FIXME SIP can be used over TCP or UDP, so we should not always mark it
+    # as TCP. This is here only for being compatible with neo4j backend.
     rec['proto'] = 'tcp'
     db.flow.any2flow(bulk, 'sip', rec)
-
 
 FUNCTIONS = {
     "conn": db.flow.conn2flow,

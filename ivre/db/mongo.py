@@ -4614,7 +4614,6 @@ class MongoDBFlow(MongoDB, DBFlow):
             '$max': {'lastseen': rec['end_time']},
             # TODO : should be optionnal
             '$addToSet': {'meta.%s' % name: meta_dict},
-            '$inc': {'count': 1}
         }
 
         flow_bulk.find(findspec).upsert().update(updatespec)
@@ -4955,27 +4954,24 @@ class MongoDBFlow(MongoDB, DBFlow):
         occurences.
         Return format:
             {
-                fields: {
-                    field1: value,
-                    field2: value
-                },
+                fields: (field_1_value, field_2_value, ...),
                 count: count,
                 collected: [
-                    {'collect1': value, 'collect2': value},
+                    (collect_1_value, collect_2_value, ...),
                     ...
                 ]
             }
+        Collected fields are unique.
         """
         pipeline = []
 
         # Translation dictionnary for special fields
         special_fields = {'src.addr': ['src_addr_0', 'src_addr_1'],
                           'dst.addr': ['dst_addr_0', 'dst_addr_1'],
-                          'dport': ['dport'],
                           'sport': ['sports']}
         # special fields that are not addresses will be translated again at
         # the end
-        reverse_special_fields = {'dport': 'dport', 'sports': 'sport'}
+        reverse_special_fields = {'sports': 'sport'}
 
         # Compute the internal fields
         # internal_fields = [aggr fields, collect_fields, sum_fields]
@@ -5054,7 +5050,7 @@ class MongoDBFlow(MongoDB, DBFlow):
         if limit is not None:
             pipeline.append({"$limit": limit})
 
-        utils.LOGGER.debug(str(pipeline))
+        # utils.LOGGER.debug(str(pipeline))
         res = self.db[self.columns[self.column_flow]].aggregate(pipeline)
         for entry in res:
             # Translate again the collected fields
@@ -5098,26 +5094,30 @@ class MongoDBFlow(MongoDB, DBFlow):
                 if key in reverse_special_fields:
                     ext_entry['_id'][reverse_special_fields[key]] = value
                     del ext_entry['_id'][key]
-
-            # Format results
-            res_fields = ext_entry.pop('_id')
+            # Format fields in a tuple ordered accordingly to fields argument
+            res_fields_dict = ext_entry.pop('_id')
+            res_fields = []
+            for key in fields:
+                res_fields.append(res_fields_dict.get(key))
+            res_fields = tuple(res_fields)
+ 
             res_count = ext_entry.pop('_count')
-            # Format collected results
-            res_collected = []
+            # Format collected results in a set of tuples
+            res_collected = set()
             if len(ext_entry) > 0:
                 number = 0
                 for key in ext_entry:
                     number = len(ext_entry[key])
                     break
                 for i in range(number):
-                    rec = {}
+                    rec = []
                     for key in collect_fields:
                         ext_entry_value = ext_entry.get(key, [])
                         # If the given collected field does not exist,
                         # ext_entry_value will be [].
-                        rec[key] = (ext_entry_value[i]
+                        rec.append(ext_entry_value[i]
                                     if len(ext_entry_value) > 0 else None)
-                    res_collected.append(rec)
+                    res_collected.add(tuple(rec))
             yield {
                 'fields': res_fields,
                 'collected': res_collected,
@@ -5502,12 +5502,12 @@ class MongoDBFlow(MongoDB, DBFlow):
             flt = and_clauses[0]
         return flt
 
-    def to_graph(self, query, limit, skip, orderby, mode, timeline):
+    def to_graph(self, query, limit=None, skip=None, orderby=None, mode=None, timeline=False):
         flt = self.flt_from_query(query)
         return self.cursor2json_graph(self.get_flows(flt, skip, limit, orderby),
                                       mode, timeline)
 
-    def to_iter(self, query, limit, skip, orderby):
+    def to_iter(self, query, limit=None, skip=None, orderby=None):
         flt = self.flt_from_query(query)
         return self.cursor2json_iter(self.get_flows(flt, skip, limit, orderby))
 

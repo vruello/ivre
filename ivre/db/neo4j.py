@@ -1225,8 +1225,18 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
                    "count": row["count"]}
 
     @classmethod
-    def _cursor2top(cls, cursor):
+    def _cursor2top(cls, cursor, fields, collected):
         for row in cursor:
+            # Format any date field correctly
+            for index, field in enumerate(fields):
+                if field in cls.DATE_FIELDS:
+                    row["fields"][index] = datetime.fromtimestamp(
+                            row["fields"][index])
+            for index, field in enumerate(collected):
+                if field in cls.DATE_FIELDS:
+                    for collect in row["collected"]:
+                        collect[index] = datetime.fromtimestamp(
+                                collect[index])
             yield {
                 "fields": row["fields"],
                 "count": row["count"],
@@ -1240,7 +1250,8 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
                                             timeline=timeline)
         return cypher_query
 
-    def to_graph(self, query, mode=None):
+    def to_graph(self, query, mode=None, limit=None, skip=None, orderby=None,
+                 timeline=False):
         res = self.cursor2json_graph(self.run(query))
         return res
 
@@ -1284,15 +1295,17 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
         counts = self._cursor2flow_daily(self.run(query))
         return counts
 
-    def top(self, query, fields, collect=None, sumfields=None):
+    def top(self, query, fields, collect_fields=[], sum_fields=[],
+            limit=None, skip=None, least=False):
         """Returns an iterator of:
         {fields: <fields>, count: <number of occurrence or sum of sumfields>,
          collected: <collected fields>}.
 
         WARNING/FIXME: this mutates the query
         """
-        collect = collect or []
-        sumfields = sumfields or []
+        original_fields = list(fields)
+        collect = list(collect_fields)
+        sumfields = sum_fields
         for flist in fields, collect, sumfields:
             for i in range(len(flist)):
                 if flist[i].startswith("link."):
@@ -1314,7 +1327,7 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
         )
         query.ret = "RETURN fields, count, collected"
         query.orderby = "ORDER BY count DESC"
-        top = self._cursor2top(self.run(query))
+        top = self._cursor2top(self.run(query), original_fields, collect_fields)
         return top
 
     def cleanup_flows(self):

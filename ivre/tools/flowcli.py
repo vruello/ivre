@@ -126,7 +126,7 @@ def main():
                                  orderby=args.orderby, mode=args.mode,
                                  timeline=args.timeline)
     sep = args.separator or ' | '
-    coma = ';' if args.separator else '; '
+    coma = ' ;' if args.separator else ' ; '
     coma2 = ',' if args.separator else ', '
     if args.count:
         count = db.flow.count(query)
@@ -139,15 +139,12 @@ def main():
                           skip=args.skip, least=args.least)
         for rec in top:
             sys.stdout.write("%s%s%s%s%s\n" % (
-                coma.join(str(rec['fields'].get(elt, "Unknown"))
-                          for elt in args.top),
+                '(' + coma2.join(str(val) for val in rec["fields"]) + ')',
                 sep,
                 rec["count"],
                 sep,
-                coma.join(str('(' + coma2.join(str(elt.get(key, "Unknown"))
-                                               for key in args.collect) + ')')
-                          for elt in rec["collected"])
-                if rec["collected"] else ""
+                coma.join(str('(' + coma2.join(str(val) for val in collected) + ')')
+                    for collected in rec["collected"]) if rec["collected"] else ""
             ))
 
     elif args.flow_daily:
