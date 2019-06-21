@@ -5033,7 +5033,7 @@ class MongoDBFlow(MongoDB, DBFlow):
         # Add sum projection if sum_fields are provided
         if len(sum_fields) > 0:
             project_fields['_sum'] = {
-                '$sum': ['$%s' % field for field in internal_fields[2]]}
+                '$add': ['$%s' % field for field in internal_fields[2]]}
 
         pipeline.append({'$project': project_fields})
 
@@ -5100,7 +5100,7 @@ class MongoDBFlow(MongoDB, DBFlow):
             for key in fields:
                 res_fields.append(res_fields_dict.get(key))
             res_fields = tuple(res_fields)
- 
+
             res_count = ext_entry.pop('_count')
             # Format collected results in a set of tuples
             res_collected = set()
