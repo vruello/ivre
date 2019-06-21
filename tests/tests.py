@@ -23,7 +23,7 @@ from __future__ import print_function
 
 from ast import literal_eval
 from contextlib import contextmanager
-from datetime import datetime
+from datetime import datetime, timedelta
 from distutils.spawn import find_executable as which
 import errno
 from functools import reduce
@@ -440,12 +440,12 @@ class IvreTests(unittest.TestCase):
         else:
             self.assertEqual(name_or_value, count)
         return count
- 
+
     def check_flow_top_values(self, name, cmd):
         res, out, err = RUN(cmd)
         self.assertEqual(res, 0)
         self.assertTrue(not err)
-        result = out.rsplit('|', 1)[0]
+        result = out.decode().rsplit('|', 1)[0]
         self.check_value(name, result)
 
     def check_flow_count_value_cli(self, name_or_value, cliflt, command="",
@@ -549,6 +549,25 @@ class IvreTests(unittest.TestCase):
         self.assertEqual(cnt1, cnt2)
         self.assertEqual(cnt2, cnt3)
         return cnt1
+
+    @classmethod
+    def get_timezone_fmt_date(cls, date_fmt):
+        """ Convert the given string formatted UTC date into a
+        string formatted local timezone date"""
+        now = time.time()
+        utc_offset = (datetime.fromtimestamp(now) -
+                      datetime.utcfromtimestamp(now))
+        try:
+            utc_offset_sec = int(utc_offset.total_seconds())
+        except AttributeError:
+            utc_offset_sec = (utc_offset.microseconds +
+                              (utc_offset.seconds +
+                               utc_offset.days * 24 * 3600)* 10**6) / 10**6
+        tz_delta = timedelta(seconds=utc_offset_sec)
+
+        date = datetime.strptime(date_fmt, "%Y-%m-%d %H:%M:%S.%f")
+        date += tz_delta
+        return date.strftime("%Y-%m-%d %H:%M:%S.%f")
 
     def find_record_cgi(self, predicate, webroute="", webflt=None):
         """Browse the results from the JSON interface to find a record for
@@ -2304,9 +2323,11 @@ which `predicate()` is True, given `webflt`.
 
         # Time precision in mongo is millisecond, whereas it is microsecond in Neo4j.
         # Thus, we can't have the same results...
-        self.check_flow_count_value("flow_count_firstseen_%s" % DATABASE, {"edges": ["firstseen = 2015-09-18 16:15:19.830319"]}, ["--flow-filters", "firstseen = 2015-09-18 16:15:19.830319"], {"edges": ["firstseen = 2015-09-18 16:15:19.830319"]})
-        self.check_flow_count_value("flow_count_lastseen_%s" % DATABASE, {"edges": ["lastseen = 2015-09-18 16:15:19.949904"]}, ["--flow-filters", "lastseen = 2015-09-18 16:15:19.949904"], {"edges": ["lastseen = 2015-09-18 16:15:19.949904"]})
-        self.check_flow_count_value("flow_count_gt_lastseen_%s" % DATABASE, {"edges": ["lastseen > 2015-09-18 16:15:19.949904"]}, ["--flow-filters", "lastseen > 2015-09-18 16:15:19.949904"], {"edges": ["lastseen > 2015-09-18 16:15:19.949904"]})
+        firstseen_date = self.get_timezone_fmt_date("2015-09-18 14:15:19.830319")
+        self.check_flow_count_value("flow_count_firstseen_%s" % DATABASE, {"edges": ["firstseen = %s" % firstseen_date]}, ["--flow-filters", "firstseen = %s" % firstseen_date], {"edges": ["firstseen = %s" % firstseen_date]})
+        lastseen_date = self.get_timezone_fmt_date("2015-09-18 14:15:19.949904")
+        self.check_flow_count_value("flow_count_lastseen_%s" % DATABASE, {"edges": ["lastseen = %s" % lastseen_date]}, ["--flow-filters", "lastseen = %s" % lastseen_date], {"edges": ["lastseen = %s" % lastseen_date]})
+        self.check_flow_count_value("flow_count_gt_lastseen_%s" % DATABASE, {"edges": ["lastseen > %s" % lastseen_date]}, ["--flow-filters", "lastseen > %s" % lastseen_date], {"edges": ["lastseen > %s" % lastseen_date]})
 
         # There are multiple syntaxes for equality test
         tcp = self.check_flow_count_value("flow_count_tcp", {"edges": ["proto = tcp"]}, ["--flow-filters", "proto = tcp"], {"edges": ["proto = tcp"]})
@@ -2351,7 +2372,7 @@ which `predicate()` is True, given `webflt`.
             self.check_flow_count_value("flow_count_10.0.0.0/8", {"nodes": ['addr =~ 10.0.0.0/8']}, ['--node-filters', "addr =~ 10.0.0.0/8"], {"nodes": ["addr =~ 10.0.0.0/8"]})
 
         # Test top values
-        self.check_flow_top_values("flow_top_flows", ["ivre", "flowcli", "--top", "src.addr", "dst.addr", "proto", "dport", "--limit", "1", "--sum", "count", "--collect", "firstseen", "lastseen"]) 
+        self.check_flow_top_values("flow_top_flows", ["ivre", "flowcli", "--top", "src.addr", "dst.addr", "proto", "dport", "--limit", "1", "--sum", "count", "--collect", "firstseen", "lastseen"])
         self.check_flow_top_values("flow_top_pair", ['ivre', 'flowcli', '--top', 'src.addr', 'dst.addr', '--sum', 'scbytes', 'csbytes', '--limit', '1', '--collect', 'proto', 'dport'])
 
 
