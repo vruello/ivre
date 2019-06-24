@@ -57,6 +57,7 @@ def sip2flow(bulk, rec):
     rec['proto'] = 'tcp'
     db.flow.any2flow(bulk, 'sip', rec)
 
+
 FUNCTIONS = {
     "conn": db.flow.conn2flow,
     "http": http2flow,

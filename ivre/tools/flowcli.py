@@ -44,6 +44,7 @@ except ImportError:
 from ivre.db import db
 from ivre import utils
 
+
 def main():
     parser, _ = utils.create_argparser(__doc__)
     parser.add_argument('--init', '--purgedb', action='store_true',
@@ -143,8 +144,11 @@ def main():
                 sep,
                 rec["count"],
                 sep,
-                coma.join(str('(' + coma2.join(str(val) for val in collected) + ')')
-                    for collected in rec["collected"]) if rec["collected"] else ""
+                coma.join(str('(' +
+                              coma2.join(str(val) for val in collected) +
+                              ')')
+                          for collected in rec["collected"])
+                if rec["collected"] else ""
             ))
 
     elif args.flow_daily:
@@ -171,7 +175,7 @@ def main():
         node_width = len('XXXX:XXXX:XXXX:XXXX:XXXX:XXXX')
         flow_width = len('tcp/XXXXX')
         for res in db.flow.to_iter(query, limit=args.limit, skip=args.skip,
-                                 orderby=args.orderby):
+                                   orderby=args.orderby):
             if args.json:
                 out.write('%s\n' % res)
             else:
