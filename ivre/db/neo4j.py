@@ -268,6 +268,7 @@ class Neo4jDB(DBFlow):
             val = utils.datetime2timestamp(val)
         return val
 
+
 # FIXME this class is a little hack to keep the logic of the Neo4j backend
 # unchanged. It should be updated to use flow.Query.
 class Neo4jFlowQuery(flow.Query):
@@ -282,9 +283,6 @@ class Neo4jFlowQuery(flow.Query):
         ">=": ">=",
         "=~": "=~",
     }
-    # TODO attributes is a dictionnary to translate "query" attributes in
-    # "backend" attributes.
-    attributes = []
 
     def __init__(self, src=None, link=None, dst=None, ret=None,
                  limit=None, skip=None, **params):
@@ -361,10 +359,8 @@ class Neo4jFlowQuery(flow.Query):
             self.clauses.extend(clause)
         return self
 
-    """
-    This should be remove and flow.Query._add_clause_from_filter should be
-    used instead.
-    """
+    # In future, this should be removed and flow.Query._add_clause_from_filter
+    # should be used instead.
     def _add_clause_from_filter(self, flt, mode="node"):
         """Returns a WHERE clause (tuple (query, parameters)) from a single
         filter (no OR).
@@ -519,10 +515,8 @@ class Neo4jFlowQuery(flow.Query):
                 current.append(subflt)
         yield " ".join(current)
 
-    """
-    This should be remove and flow.Query.add_clause_from_filter should be
-    used instead.
-    """
+    # FIXME This should be removed and flow.Query.add_clause_from_filter
+    # should be used instead.
     def add_clause_from_filter(self, flt, mode="node"):
         """ADD a WHERE clause from a node filter.
 
@@ -837,7 +831,7 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
         return query
 
     def any2flow(self, bulk, name, rec):
-        kind = "flow" # FIXME
+        kind = "flow"  # FIXME
         desc = ALL_DESCS[name]
         keys = desc["keys"]
         link_type = desc.get("link", "INTEL")
@@ -1231,12 +1225,12 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
             for index, field in enumerate(fields):
                 if field in cls.DATE_FIELDS:
                     row["fields"][index] = datetime.fromtimestamp(
-                            row["fields"][index])
+                        row["fields"][index])
             for index, field in enumerate(collected):
                 if field in cls.DATE_FIELDS:
                     for collect in row["collected"]:
                         collect[index] = datetime.fromtimestamp(
-                                collect[index])
+                            collect[index])
             yield {
                 "fields": row["fields"],
                 "count": row["count"],
@@ -1295,7 +1289,7 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
         counts = self._cursor2flow_daily(self.run(query))
         return counts
 
-    def top(self, query, fields, collect_fields=[], sum_fields=[],
+    def top(self, query, fields, collect_fields=None, sum_fields=None,
             limit=None, skip=None, least=False):
         """Returns an iterator of:
         {fields: <fields>, count: <number of occurrence or sum of sumfields>,
@@ -1303,6 +1297,8 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
 
         WARNING/FIXME: this mutates the query
         """
+        collect_fields = collect_fields if collect_fields is not None else []
+        sum_fields = sum_fields if sum_fields is not None else []
         original_fields = list(fields)
         collect = list(collect_fields)
         sumfields = sum_fields
@@ -1327,7 +1323,10 @@ class Neo4jDBFlow(Neo4jDB, DBFlow):
         )
         query.ret = "RETURN fields, count, collected"
         query.orderby = "ORDER BY count DESC"
-        top = self._cursor2top(self.run(query), original_fields, collect_fields)
+        top = self._cursor2top(
+            self.run(query),
+            original_fields,
+            collect_fields)
         return top
 
     def cleanup_flows(self):
@@ -1477,8 +1476,6 @@ DETACH DELETE old_f
             tmp_rec["addr"] = addr
             self.any2flow(bulk, "dns", tmp_rec)
 
-
-
     def conn2flow(self, bulk, rec):
         """Returns a statement inserting a CONN flow from a Bro log"""
         query_cache = self.query_cache
@@ -1503,8 +1500,8 @@ DETACH DELETE old_f
                 accumulators=accumulators)
         bulk.append(query_cache[linkattrs], rec)
 
-
-    def bulk_commit(self, bulk):
+    @staticmethod
+    def bulk_commit(bulk):
         bulk.commit()
 
 
