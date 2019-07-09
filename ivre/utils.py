@@ -1824,3 +1824,16 @@ def is_ptr(ptr):
     Check whether the given string is a PTR
     """
     return ptr.endswith(".in-addr.arpa") or ptr.endswith(".ip6.arpa")
+
+
+def deep_sort_dict_list(elt):
+    """
+    Deep sort the list values inside a dictionary.
+    elt must be a dictionary
+    Notice: It does not sort nested lists.
+    """
+    for key, value in viewitems(elt):
+        if isinstance(value, list):
+            value.sort()
+        elif isinstance(value, dict):
+            deep_sort_dict_list(value)

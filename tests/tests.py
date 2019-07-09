@@ -2518,6 +2518,26 @@ which `predicate()` is True, given `webflt`.
                 {"nodes": ['addr =~ 10.0.0.0/8']},
                 ['--node-filters', "addr =~ 10.0.0.0/8"],
                 {"nodes": ["addr =~ 10.0.0.0/8"]})
+            # Test flow data
+            flt = ivre.db.db.flow.from_filters({
+                "nodes": [],
+                "edges": ["meta.sip"]
+            })
+            elt = ivre.db.db.flow.get(flt, orderby='src', limit=1).next()
+            del elt['_id']
+            # Format datetime fields in ISO format
+            utc_offset_sec = ivre.utils.current_tz_offset()
+            tz_delta = timedelta(seconds=utc_offset_sec)
+            for field in ivre.db.db.flow.datefields:
+                if field in elt:
+                    elt[field] = (elt[field] - tz_delta).isoformat()
+            # Format timeslots in ISO format
+            for i, time in enumerate(elt.get('times', [])):
+                elt['times'][i] = (time - tz_delta).isoformat()
+
+            # Sort lists (except nested lists)
+            ivre.utils.deep_sort_dict_list(elt)
+            self.check_value("flow_elt_sip", elt)
 
         # Test top values
         self.check_flow_top_values(
