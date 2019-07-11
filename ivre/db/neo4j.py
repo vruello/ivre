@@ -192,17 +192,19 @@ class Neo4jDB(DBFlow):
                 return datetime.strptime(val, cls.TIMEFMT)
             if isinstance(val, datetime):
                 return val
+            if isinstance(val, dict):
+                return datetime(val['year'], val['month'], val['day'], val['hour'], val['minute'], val['second'], val['microsecond'])
             raise ValueError("Expected float or str for date field %s" % prop)
         return val
 
     @classmethod
     def to_dbdict(cls, d):
-        d.pop("__key__", None)
-        for k in d:
-            d[k] = cls.to_dbprop(k, d[k])
         seen_time = d.get("start_time", d.get("end_time", None))
         if seen_time and "seen_time" not in d:
             d["seen_time"] = cls.date_round(seen_time)
+        d.pop("__key__", None)
+        for k in d:
+            d[k] = cls.to_dbprop(k, d[k])
 
     @classmethod
     def to_dbprop(cls, prop, val):
@@ -210,7 +212,7 @@ class Neo4jDB(DBFlow):
             val = datetime.strptime(val, cls.TIMEFMT)
         # Intentional double if: str -> datetime -> float
         if isinstance(val, datetime):
-            val = utils.datetime2timestamp(val)
+            val = val.isoformat()
         return val
 
 
@@ -647,33 +649,30 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
             start = "{start_time}"
         if end is None:
             end = "{end_time}"
-        on_create_set.append("%s.firstseen = %s" % (elt, start))
+        on_create_set.append("%s.firstseen = localdatetime(%s)" % (elt, start))
         on_match_set.append("%(elt)s.firstseen = CASE WHEN %(elt)s.firstseen"
-                            " > %(start)s THEN %(start)s ELSE "
+                            " > localdatetime(%(start)s) THEN localdatetime(%(start)s) ELSE "
                             "%(elt)s.firstseen END" %
                             {"elt": elt, "start": start})
-        on_create_set.append("%s.lastseen = %s" % (elt, end))
+        on_create_set.append("%s.lastseen = localdatetime(%s)" % (elt, end))
         on_match_set.append("%(elt)s.lastseen = CASE WHEN %(elt)s.lastseen < "
-                            "%(end)s THEN %(end)s ELSE "
+                            "localdatetime(%(end)s) THEN localdatetime(%(end)s) ELSE "
                             "%(elt)s.lastseen END" %
                             {"elt": elt, "end": end})
 
     @classmethod
-    def _update_time_seen(cls, elt):
+    def _update_time_seen(cls, rec, elt):
         if config.FLOW_TIME:
             # Experimental and possibly useless
             if config.FLOW_TIME_FULL_RANGE:
                 return (
-                    "FOREACH (stime IN RANGE(\n"
-                    "           {start_time} - ({start_time} %% %(prec)d),\n"
-                    "           {end_time} - ({end_time} %% %(prec)d),\n"
-                    "           %(prec)d) | \n"
-                    "    MERGE (t:Time {time: stime})\n"
+                    "FOREACH (timeslot in {timeslots} | \n"
+                    "    MERGE (t:Time {time: localdatetime(timeslot)})\n"
                     "    MERGE (%(elt)s)-[:SEEN]->(t))"
-                ) % {"elt": elt, "prec": config.FLOW_TIME_PRECISION}
+                ) % {"elt": elt}
             else:
                 return (
-                    "MERGE (t:Time {time: {seen_time}})\n"
+                    "MERGE (t:Time {time: localdatetime({seen_time})})\n"
                     "MERGE (%s)-[:SEEN]->(t)" % elt
                 )
         else:
@@ -770,7 +769,7 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
 
         return '\n'.join(clauses)
 
-    def _add_flow(self, labels, keys, elt="link", counters=None,
+    def _add_flow(self, rec, labels, keys, elt="link", counters=None,
                   accumulators=None, srcnode=None, dstnode=None, time=True):
         keys = utils.normalize_props(keys)
         if srcnode is None:
@@ -791,7 +790,8 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
 
         query.append(self._prop_update(elt, props=keys, counters=counters,
                                        accumulators=accumulators, time=time))
-        query.append(self._update_time_seen(elt))
+        print("rec", rec)
+        query.append(self._update_time_seen(rec, elt))
         return "\n".join(query)
 
     def add_flow(self, *args, **kargs):
@@ -980,6 +980,33 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
         return node
 
     @classmethod
+    def gen_with(cls, name, nodes_attr):
+        date_attr = ['year', 'month', 'day', 'hour', 'minute', 'second', 'millisecond', 'microsecond']
+        node_attrs = []
+        for attr in nodes_attr:
+            if attr in cls.DATE_FIELDS:
+                date_attrs = []
+                for dattr in date_attr:
+                    date_attrs.append("%(dattr)s: %(name)s.%(attr)s.%(dattr)s"
+                        % {'attr': attr, 'name': name, 'dattr': dattr})
+                node_attr = "%s: {%s}" % (attr, ", ".join(date_attrs))
+            else:
+                node_attr = "%s: %s.%s" % (attr, name, attr)
+            node_attrs.append(node_attr)
+        node_attrs.append("metadata: {id: ID(%s), labels: LABELS(%s)}" % (name, name))
+        return "{%s} as %s" % (", ".join(node_attrs), name)
+
+    @classmethod
+    def gen_node_with(cls, name):
+        nodes_attr = ['addr', 'firstseen', 'lastseen']
+        return cls.gen_with(name, nodes_attr)
+
+    @classmethod
+    def gen_link_with(cls, name):
+        edges_attr = ['lastseen', 'dport', 'firstseen', '__key__', 'scbytes', 'cspkts', 'sports', 'proto', 'count', 'csbytes', 'scpkts', 'type', 'codes']
+        return cls.gen_with(name, edges_attr)
+
+    @classmethod
     def _filters2cypher(cls, queries, limit=None, skip=0, orderby="",
                         mode=None, timeline=False):
         limit = config.WEB_GRAPH_LIMIT if limit is None else limit
@@ -989,6 +1016,8 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
         for flt_type in ["node", "edge"]:
             for flt in queries.get("%ss" % flt_type, []):
                 query.add_clause_from_filter(flt, mode=flt_type)
+        query.add_clause('WITH %s,\n %s,\n %s\n' % (
+            cls.gen_node_with('src'), cls.gen_node_with('dst'), cls.gen_link_with('link')))
         if mode == "talk_map":
             query.add_clause('WITH src, dst, COUNT(link) AS t, '
                              'COLLECT(DISTINCT LABELS(link)) AS labels, '
@@ -1102,7 +1131,7 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
         if isinstance(elt, Node) or isinstance(elt, Relationship):
             props = elt.properties
         else:
-            props = elt.get("data", {})
+            props = elt
         if meta:
             props["meta"] = meta
         return props
@@ -1130,6 +1159,8 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
         {src: <dict>, flow: <dict>, dst: <dict>}.
         """
         for src, flw, dst in cursor:
+            print("SRC", src)
+            print ("FLW", flw)
             for rec in [src, flw, dst]:
                 cls._cleanup_record(rec)
             src_props = cls._get_props(src["elt"], src.get("meta"))
@@ -1273,7 +1304,7 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
         query.add_clause(
             "WITH src.elt as src, link.elt as link, dst.elt as dst\n"
             "MATCH (link)-[:SEEN]->(t:Time)\n"
-            "WITH src, link, dst, t, (t.time % 86400) as time_in_day\n"
+            "WITH src, link, dst, t, (t.time.hour * 3600 + t.time.minute * 60 + t.time.second) as time_in_day\n"
             "WITH [link.proto, COALESCE(link.dport, link.type)] AS flow,\n"
             "     time_in_day, COUNT(*) AS count\n"
         )
@@ -1486,8 +1517,13 @@ DETACH DELETE old_f
             "scpkts": "{resp_pkts}",
             "scbytes": "{resp_ip_bytes}",
         }
+
+        if config.FLOW_TIME_FULL_RANGE:
+                rec['timeslots'] = [t.isoformat() for t in
+                        self._get_timeslots(rec['start_time'], rec['end_time'])]
+
         if linkattrs not in query_cache:
-            query_cache[linkattrs] = self.add_flow(
+            query_cache[linkattrs] = self.add_flow(rec,
                 ["Flow"], linkattrs, counters=counters,
                 accumulators=accumulators)
         bulk.append(query_cache[linkattrs], rec)
@@ -1504,7 +1540,7 @@ DETACH DELETE old_f
                 break
         counters = ["cspkts", "scpkts", "csbytes", "scbytes"]
         if linkattrs not in query_cache:
-            query_cache[linkattrs] = self.add_flow(
+            query_cache[linkattrs] = self.add_flow(rec,
                 ["Flow"], linkattrs, counters=counters,
                 accumulators=accumulators)
         bulk.append(query_cache[linkattrs], rec)
