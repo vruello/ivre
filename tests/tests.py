@@ -553,9 +553,10 @@ class IvreTests(unittest.TestCase):
     def get_timezone_fmt_date(cls, date_fmt):
         """ Convert the given string formatted UTC date into a
         string formatted local timezone date"""
-        utc_offset_sec = ivre.utils.current_tz_offset()
-        tz_delta = timedelta(seconds=utc_offset_sec)
         date = datetime.strptime(date_fmt, "%Y-%m-%d %H:%M:%S.%f")
+        utc_offset_sec = ivre.utils.tz_offset(
+            timestamp=ivre.utils.datetime2timestamp(date))
+        tz_delta = timedelta(seconds=utc_offset_sec)
         date += tz_delta
         return date.strftime("%Y-%m-%d %H:%M:%S.%f")
 
@@ -2487,6 +2488,7 @@ which `predicate()` is True, given `webflt`.
             {"edges": ["ALL sports > 50000"]})
 
         # Test flow daily
+        # Notice: this depends on the local timezone!
         res, out, err = RUN(['ivre', 'flowcli', '--flow-daily'])
         self.assertEqual(res, 0)
         self.assertTrue(not err)
@@ -2523,17 +2525,17 @@ which `predicate()` is True, given `webflt`.
                 "nodes": [],
                 "edges": ["meta.sip"]
             })
-            elt = ivre.db.db.flow.get(flt, orderby='src', limit=1).next()
+            elt = next(ivre.db.db.flow.get(flt, orderby='src', limit=1))
             del elt['_id']
             # Format datetime fields in ISO format
-            utc_offset_sec = ivre.utils.current_tz_offset()
-            tz_delta = timedelta(seconds=utc_offset_sec)
             for field in ivre.db.db.flow.datefields:
                 if field in elt:
-                    elt[field] = (elt[field] - tz_delta).isoformat()
+                    elt[field] = ivre.utils.datetime2utcdatetime(
+                        elt[field]).isoformat()
             # Format timeslots in ISO format
             for i, time in enumerate(elt.get('times', [])):
-                elt['times'][i] = (time - tz_delta).isoformat()
+                elt['times'][i] = ivre.utils.datetime2utcdatetime(
+                    time).isoformat()
 
             # Sort lists (except nested lists)
             ivre.utils.deep_sort_dict_list(elt)
@@ -3956,7 +3958,9 @@ TESTS = set(["10_data", "30_nmap", "40_passive", "50_view", "53_nmap_delete",
 
 DATABASES = {
     # **excluded** tests
-    "mongo": ["utils"],
+    # "mongo": ["utils"],
+    "mongo": ["10_data", "30_nmap", "40_passive", "50_view", "53_nmap_delete",
+              "54_passive_delete", "90_cleanup", "scans", "utils"],
     "postgres": ["60_flow", "scans", "utils"],
     "sqlite": ["30_nmap", "53_nmap_delete", "50_view", "60_flow", "scans",
                "utils"],

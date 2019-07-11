@@ -1395,16 +1395,30 @@ datetime.datetime instance `dtm`"""
         return time.mktime(dtm.timetuple()) + dtm.microsecond / (1000000.)
 
 
-def current_tz_offset():
-    now = time.time()
-    utc_offset = (datetime.datetime.fromtimestamp(now) -
-                  datetime.datetime.utcfromtimestamp(now))
+def tz_offset(timestamp=None):
+    """
+    Returns the offset between UTC and local time at "timestamp".
+    """
+    if timestamp is None:
+        timestamp = time.time()
+    utc_offset = (datetime.datetime.fromtimestamp(timestamp) -
+                  datetime.datetime.utcfromtimestamp(timestamp))
     try:
         utc_offset_sec = int(utc_offset.total_seconds())
     except AttributeError:
         # total_seconds does not exist in Python 2.6
         utc_offset_sec = utc_offset.seconds + utc_offset.days * 24 * 3600
     return utc_offset_sec
+
+
+def datetime2utcdatetime(dtm):
+    """
+    Returns the given datetime in UTC. dtm is expected to be in local
+    timezone.
+    """
+    offset = tz_offset(timestamp=datetime2timestamp(dtm))
+    delta = datetime.timedelta(seconds=offset)
+    return dtm - delta
 
 
 _UNITS = ['']
