@@ -4634,8 +4634,11 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
                     "$each": cls._get_timeslots(
                         rec['start_time'], rec['end_time'])}
             else:
-                updatespec.setdefault("$addToSet", {})["times"] = (
-                    cls.date_round(rec['start_time']))
+                d = OrderedDict()
+                d['start'] = cls.date_round(rec['start_time'])
+                d['duration'] = config.FLOW_TIME_PRECISION
+
+                updatespec.setdefault("$addToSet", {})["times"] = d
 
     @classmethod
     def dns2flow(cls, bulk, rec):
@@ -5077,8 +5080,10 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
                 "__key__": str(row.get('_id')),
             }
         }
-        if timeline and row.get('times', []):
-            res["data"]["meta"] = {"times": row.get('times')}
+        if timeline and row.get('times'):
+            res["data"]["meta"] = {
+                "times": [t.get('start') for t in row.get('times')]
+            }
         if row.get('proto') in ['tcp', 'udp']:
             res['data']["sports"] = row.get('sports')
             res['data']["dport"] = row.get('dport')
@@ -5571,9 +5576,9 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
         # Project time in hours, minutes, seconds
         pipeline.append({
             '$project': {
-                'hour': {'$hour': '$times'},
-                'minute': {'$minute': '$times'},
-                'second': {'$second': '$times'},
+                'hour': {'$hour': '$times.start'},
+                'minute': {'$minute': '$times.start'},
+                'second': {'$second': '$times.start'},
                 'proto': 1,
                 'dport': 1,
                 'count': 1,
