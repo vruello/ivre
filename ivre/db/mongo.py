@@ -45,7 +45,7 @@ except ImportError:
 import uuid
 
 import bson
-from future.builtins import bytes, range
+from future.builtins import bytes, range, zip
 from future.utils import viewitems, with_metaclass
 from past.builtins import basestring
 from pymongo.errors import BulkWriteError
@@ -4990,10 +4990,10 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
                          ext_entry['_id'].pop(addr1)))
                 # Apply in collected fields
                 if addr0 in ext_entry and addr1 in ext_entry:
-                    ext_entry[addr] = []
-                    for i in range(len(ext_entry[addr0])):
-                        ext_entry[addr].append(self.internal2ip(
-                            [ext_entry[addr0][i], ext_entry[addr1][i]]))
+                    ext_entry[addr] = [
+                        self.internal2ip((a, b)) for a, b in
+                        zip(ext_entry[addr0], ext_entry[addr1])
+                    ]
                     del ext_entry[addr0]
                     del ext_entry[addr1]
             # reverse special fields

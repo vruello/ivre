@@ -2567,6 +2567,12 @@ which `predicate()` is True, given `webflt`.
              'scbytes', 'csbytes', '--limit', '1', '--collect', 'proto',
              'dport'])
 
+        self.check_flow_top_values(
+            "flow_top_transport",
+            ['ivre', 'flowcli', '--top', 'proto', 'dport', '--sum',
+             'scbytes', 'csbytes', '--limit', '1', '--collect', 'src.addr',
+             'dst.addr'])
+
     # This test have to be done first.
     def test_10_data(self):
         """ipdata (Maxmind, thyme.apnic.net) functions"""
