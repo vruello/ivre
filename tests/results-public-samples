@@ -28,6 +28,7 @@ flow_count_lastseen_neo4j = {'clients': 1, 'flows': 1, 'servers': 1}
 flow_count_len_sports_mongo = {'clients': 2, 'flows': 3, 'servers': 3}
 flow_count_len_sports_neo4j = {'clients': 2, 'flows': 3, 'servers': 3}
 flow_count_meta_dns_query_neuf_fr = {'clients': 3, 'flows': 3, 'servers': 1}
+flow_count_netflow = {'clients': 22, 'flows': 65, 'servers': 55}
 flow_count_not_sport = {'clients': 7, 'flows': 7, 'servers': 7}
 flow_count_scbytes_92 = {'clients': 1, 'flows': 3, 'servers': 3}
 flow_count_scpkts_2 = {'clients': 5, 'flows': 8, 'servers': 8}
