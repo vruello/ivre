@@ -67,6 +67,7 @@ def main():
     parser.add_argument("-C", "--no-cleanup",
                         help="avoid port cleanup heuristics",
                         action="store_true")
+    parser.add_argument("-s", "--sensor", type=str)
     args = parser.parse_args()
 
     if args.verbose:
@@ -85,7 +86,7 @@ def main():
                         fname,
                     )
                     continue
-        bulk = db.flow.start_bulk_insert()
+        bulk = db.flow.start_bulk_insert(args.sensor)
         with fileparser(fname, args.pcap_filter) as fdesc:
             for rec in fdesc:
                 if not rec:
