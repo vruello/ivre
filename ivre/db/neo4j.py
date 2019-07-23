@@ -1105,6 +1105,12 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
             props = elt.get("data", {})
         if meta:
             props["meta"] = meta
+            if 'times' in meta:
+                for (i, t) in enumerate(meta['times']):
+                    meta['times'][i] = {
+                        'start': datetime.fromtimestamp(t),
+                        'duration': config.FLOW_TIME_PRECISION
+                    }
         return props
 
     @staticmethod
