@@ -99,9 +99,9 @@ def main():
                         "Reduce precision to NEW_PRECISION for flows "
                         "timeslots. Takes account of precision, before, "
                         "after, filters.")
-    parser.add_argument("--base", type=int, help="When using "
-                        "--reduce-precision, set timeslots base. Defaults to "
-                        + str(config.FLOW_DEFAULT_BASE), default=None)
+    parser.add_argument("--base", "-B", type=int, help="When using "
+                        "--reduce-precision, set timeslots base. Defaults "
+                        "to " + str(config.FLOW_DEFAULT_BASE), default=None)
     parser.add_argument("--after", "-a", type=str, help="Get only flows "
                         "seen after this date. Format: YEAR-MONTH-DAY "
                         "HOUR:MINUTE. Based on timeslots precision.")

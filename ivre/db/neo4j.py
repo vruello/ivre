@@ -1226,23 +1226,30 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
                 "collected": row["collected"],
             }
 
-    def from_filters(self, filters, limit=None, skip=0, orderby="", mode=None,
-                     timeline=False):
-        cypher_query = self._filters2cypher(filters, limit=limit, skip=skip,
-                                            orderby=orderby, mode=mode,
-                                            timeline=timeline)
+    @classmethod
+    def from_filters(cls, filters, limit=None, skip=0, orderby="", mode=None,
+                     timeline=False, after=None, before=None, precision=None):
+        """
+        Note: after, before, precision are IGNORED. They are present only for
+        compatibility reasons.
+        """
+        cypher_query = cls._filters2cypher(filters, limit=limit, skip=skip,
+                                           orderby=orderby, mode=mode,
+                                           timeline=timeline)
         return cypher_query
 
-    def to_graph(self, query, mode=None, limit=None, skip=None, orderby=None,
-                 timeline=False):
-        res = self.cursor2json_graph(self.run(query))
-        return res
+    def to_graph(self, flt, limit=None, skip=None, orderby=None, mode=None,
+                 timeline=False, after=None, before=None):
+        # Note: Everything but flt is ignored in neo4j backend.
+        return self.cursor2json_graph(self.run(flt))
 
-    def to_iter(self, query, limit=None, skip=None, orderby=None, mode=None,
-                timeline=False):
-        return self.cursor2json_iter(self.run(query))
+    def to_iter(self, flt, limit=None, skip=None, orderby=None, mode=None,
+                timeline=False, after=None, before=None, precision=None):
+        # Note: Everything but flt is ignored in neo4j backend.
+        return self.cursor2json_iter(self.run(flt))
 
-    def count(self, query):
+    def count(self, query, after=None, before=None, precision=None):
+        # Note: after, before, precision are unused.
         old_limit = query.limit
         old_skip = query.skip
         old_ret = query.ret
@@ -1262,14 +1269,16 @@ class Neo4jDBFlow(with_metaclass(Neo4jDBFlowMeta, Neo4jDB, DBFlow)):
         query.orderby = old_orderby
         return counts
 
-    def flow_daily(self, query):
-        """Returns a generator within each element is a dict
+    def flow_daily(self, precision, flt=None):
+        """
+        Returns a generator within each element is a dict
         {
             flows: [("proto/dport", count), ...]
             time_in_day: time
         }
         WARNING/FIXME: this mutates the query
         """
+        query = flt
         query.add_clause(
             "WITH src.elt as src, link.elt as link, dst.elt as dst\n"
             "MATCH (link)-[:SEEN]->(t:Time)\n"
