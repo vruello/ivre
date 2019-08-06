@@ -2468,11 +2468,11 @@ class DBFlow(DB):
         Returns an array of timeslots included between start_time and end_time
         """
         times = []
-        first_timeslot = cls._get_new_timeslot(
+        first_timeslot = cls._get_timeslot(
             start_time, config.FLOW_TIME_PRECISION, config.FLOW_TIME_BASE
         )
         time = first_timeslot['start']
-        last_timeslot = cls._get_new_timeslot(
+        last_timeslot = cls._get_timeslot(
             end_time, config.FLOW_TIME_PRECISION, config.FLOW_TIME_BASE
         )
         end_time = last_timeslot['start']
@@ -2485,7 +2485,7 @@ class DBFlow(DB):
         return times
 
     @staticmethod
-    def _get_new_timeslot(time, precision, base):
+    def _get_timeslot(time, precision, base):
         ts = utils.datetime2timestamp(time)
         ts += utils.tz_offset(ts)
         new_ts = ts - (((ts % precision) - base) % precision)
