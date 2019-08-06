@@ -99,10 +99,6 @@ def main():
                         "Reduce precision to NEW_PRECISION for flows "
                         "timeslots. Takes account of precision, before, "
                         "after, filters.")
-    parser.add_argument("--base", "-B", type=int, help="Only with MongoDB "
-                        "backend. When using --reduce-precision, set timeslots"
-                        " base. Defaults to " + str(config.FLOW_DEFAULT_BASE),
-                        default=None)
     parser.add_argument("--after", "-a", type=str, help="Only with MongoDB "
                         "backend. Get only flows seen after this date. "
                         "Date format: YEAR-MONTH-DAY HOUR:MINUTE. "
@@ -181,7 +177,7 @@ def main():
                 sys.exit(-1)
         new_duration = args.reduce_precision
         db.flow.reduce_precision(new_duration, flt=query,
-                                 base=args.base, before=time_values['before'],
+                                 before=time_values['before'],
                                  after=time_values['after'],
                                  precision=args.precision)
         sys.exit(0)

@@ -4668,11 +4668,10 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
                     "$each": cls._get_timeslots(
                         rec['start_time'], rec['end_time'])}
             else:
-                d = OrderedDict()
-                d['start'] = cls.date_round(rec['start_time'])
-                d['duration'] = config.FLOW_TIME_PRECISION
-
-                updatespec.setdefault("$addToSet", {})["times"] = d
+                updatespec.setdefault("$addToSet", {})["times"] = (
+                    cls._get_new_timeslot(rec['start_time'],
+                                          config.FLOW_TIME_PRECISION,
+                                          config.FLOW_TIME_BASE))
 
     @classmethod
     def dns2flow(cls, bulk, rec):
@@ -5726,16 +5725,14 @@ class MongoDBFlow(with_metaclass(MongoDBFlowMeta, MongoDB, DBFlow)):
             yield res
 
     def reduce_precision(self, new_duration, flt=None,
-                         base=None, before=None, after=None, precision=None):
-        # validate base
-        if base is None:
-            base = config.FLOW_DEFAULT_BASE
+                         before=None, after=None, precision=None):
+        base = config.FLOW_TIME_BASE
 
         current_duration = precision
         if current_duration is not None:
             if base % current_duration != 0:
-                raise ValueError("Base must be a multiple of current "
-                                 "precision.")
+                raise ValueError("Base %d must be a multiple of current "
+                                 "precision." % config.FLOW_TIME_BASE)
             base %= new_duration
             # validate new duration
             if new_duration <= current_duration:
