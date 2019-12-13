@@ -38,6 +38,7 @@ import struct
 import subprocess
 import sys
 import tempfile
+import time
 try:
     from urllib.parse import urlparse
 except ImportError:
@@ -47,7 +48,7 @@ import xml.sax
 
 
 from builtins import range
-from future.utils import viewitems, viewvalues
+from future.utils import viewitems, viewvalues, with_metaclass
 # tests: I don't want to depend on cluster for now
 try:
     import cluster
@@ -2742,7 +2743,48 @@ LockError on failure.
             return self.str2id(fdesc.read())
 
 
-class DBFlow(DB):
+class DBFlowMeta(type):
+    """
+    This metaclass aims to compute 'meta_desc' and 'list_fields' once for all
+    instances of DBFlow.
+    """
+    def __new__(cls, name, bases, attrs):
+        attrs['meta_desc'] = DBFlowMeta.compute_meta_desc()
+        attrs['list_fields'] = DBFlowMeta.compute_list_fields(
+            attrs['meta_desc'])
+        return type.__new__(cls, name, bases, attrs)
+
+    @staticmethod
+    def compute_meta_desc():
+        """
+        Computes meta_desc from flow.META_DESC
+        meta_desc is a "usable" version of flow.META_DESC. It is computed only
+        once at class initialization.
+        """
+        meta_desc = {}
+        for proto, configs in viewitems(flow.META_DESC):
+            meta_desc[proto] = {}
+            for kind, values in viewitems(configs):
+                meta_desc[proto][kind] = (
+                    utils.normalize_props(values, braces=False)
+                )
+        return meta_desc
+
+    @staticmethod
+    def compute_list_fields(meta_desc):
+        """
+        Computes list_fields from meta_desc.
+        """
+        list_fields = ['sports', 'codes', 'times']
+        for proto, kinds in viewitems(meta_desc):
+            for kind, values in viewitems(kinds):
+                if kind == 'keys':
+                    for name in values:
+                        list_fields.append('meta.%s.%s' % (proto, name))
+        return list_fields
+
+
+class DBFlow(with_metaclass(DBFlowMeta, DB)):
     """Backend-independent code to handle flows"""
 
     @classmethod
@@ -2802,6 +2844,26 @@ class DBFlow(DB):
         d["duration"] = precision
         return d
 
+    @classmethod
+    def dns2flow(cls, bulk, rec):
+        """
+        Takes a parsed dns.log line entry and adds it to insert bulk.
+        It must be a separate method because of neo4j compatibility.
+        """
+        return cls.any2flow(bulk, 'dns', rec)
+
+    @staticmethod
+    def bulk_commit(bulk):
+        start_time = time.time()
+        result = bulk.execute()
+        newtime = time.time()
+        insert_rate = result.get('nInserted') / (newtime - start_time)
+        upsert_rate = result.get('nUpserted') / (newtime - start_time)
+        utils.LOGGER.debug("%d inserts, %f/sec",
+                            result.get('nInserted'), insert_rate)
+        utils.LOGGER.debug("%d upserts, %f/sec",
+                            result.get('nUpserted'), upsert_rate)
+
     def reduce_precision(self, new_precision, flt=None,
                          before=None, after=None, current_precision=None):
         """
@@ -2848,7 +2910,13 @@ class DBFlow(DB):
         """
         Returns a dict {"nodes": [], "edges": []}.
         """
-        raise NotImplementedError
+        return self.cursor2json_graph(
+            self.get(flt, skip, limit, orderby),
+            mode,
+            timeline,
+            after=after,
+            before=before
+        )
 
     def to_iter(self, flt, limit=None, skip=None, orderby=None, mode=None,
                 timeline=False, after=None, before=None, precision=None):
@@ -2856,7 +2924,11 @@ class DBFlow(DB):
         Returns a generator which yields dict {"src": src, "dst": dst,
         "flow": flow}.
         """
-        raise NotImplementedError
+        return self.cursor2json_iter(
+            self.get(flt, skip, limit, orderby),
+            mode=mode,
+            timeline=timeline
+        )
 
     def host_details(self, node_id):
         """
@@ -2903,6 +2975,201 @@ class DBFlow(DB):
         """
         raise NotImplementedError
 
+    @staticmethod
+    def _flow2host(row, prefix):
+        """
+        Returns a dict which represents one of the two host of the given flow.
+        prefix should be 'dst' or 'src' to get the source or the destination
+        host.
+        """
+        res = {}
+        if prefix == 'src':
+            res['addr'] = row.get('src_addr')
+        elif prefix == 'dst':
+            res['addr'] = row.get('dst_addr')
+        else:
+            raise Exception("prefix must be 'dst' or 'src'")
+        res['firstseen'] = row.get('firstseen')
+        res['lastseen'] = row.get('lastseen')
+        return res
+
+    @staticmethod
+    def _node2json(row):
+        """
+        Returns a dict representing a node in graph output.
+        row must be the representation of an host, see _flow2host.
+        """
+        return {
+            "id": row.get('addr'),
+            "label": row.get('addr'),
+            "labels": ["Host"],
+            "x": random.random(),
+            "y": random.random(),
+            "data": row
+        }
+
+    @staticmethod
+    def _edge2json_default(row, timeline=False, after=None, before=None,
+                           precision=None):
+        """
+        Returns a dict representing an edge in default graph output.
+        row must be a flow entry.
+        """
+        label = (row.get('proto') + '/' + str(row.get('dport'))
+                 if row.get('proto') in ['tcp', 'udp']
+                 else row.get('proto') + '/' + str(row.get('type')))
+        res = {
+            "id": str(row.get('_id')),
+            "label": label,
+            "labels": ["Flow"],
+            "source": row.get('src_addr'),
+            "target": row.get('dst_addr'),
+            "data": {
+                "cspkts": row.get('cspkts'),
+                "csbytes": row.get('csbytes'),
+                "count": row.get('count'),
+                "scpkts": row.get('scpkts'),
+                "scbytes": row.get('scbytes'),
+                "proto": row.get('proto'),
+                "firstseen": row.get('firstseen'),
+                "lastseen": row.get('lastseen'),
+                "__key__": str(row.get('_id')),
+                "addr_src": row.get('src_addr'),
+                "addr_dst": row.get('dst_addr')
+            }
+        }
+
+        # Fill timeline field if necessary
+        if timeline and row.get('times'):
+            # Remove timeslots that do not satisfy temporal filters
+            res["data"]["meta"] = {
+                "times": [
+                    t for t in row.get('times')
+                    if ((after is None or t.get('start') >= after) and
+                        (before is None or t.get('start') < before) and
+                        (precision is None or t.get('duration') == precision))
+                ]
+            }
+
+        if row.get('proto') in ['tcp', 'udp']:
+            res['data']["sports"] = row.get('sports')
+            res['data']["dport"] = row.get('dport')
+        elif row.get('proto') == 'icmp':
+            res['data']['codes'] = row.get('codes')
+            res['data']['type'] = row.get('type')
+        return res
+
+    @staticmethod
+    def _edge2json_flow_map(row):
+        """
+        Returns a dict representing an edge in flow map graph output.
+        row must be a flow entry.
+        """
+        if row.get('proto') in ['udp', 'tcp']:
+            flowkey = (row.get('proto'), row.get('dport'))
+        else:
+            flowkey = (row.get('proto'), None)
+        res = {
+            "id": str(row.get('_id')),
+            "label": "MERGED_FLOWS",
+            "labels": ["MERGED_FLOWS"],
+            "source": row.get('src_addr'),
+            "target": row.get('dst_addr'),
+            "data": {
+                "count": 1,
+                "flows": [flowkey]
+            }
+        }
+        return res
+
+    @staticmethod
+    def _edge2json_talk_map(row):
+        """
+        Returns a dict representing an edge in talk map graph output.
+        row must be a flow entry.
+        """
+        res = {
+            "id": str(row.get('_id')),
+            "label": "TALK",
+            "labels": ["TALK"],
+            "source": row.get('src_addr'),
+            "target": row.get('dst_addr'),
+            "data": {
+                "count": 1,
+                "flows": ["TALK"]
+            }
+        }
+        return res
+
+    @classmethod
+    def cursor2json_iter(cls, cursor, mode=None, timeline=False, after=None,
+                         before=None, precision=None):
+        """
+        Takes a MongoDB cursor on flows collection and for each entry
+        yield a dict {src: src_node, dst: dst_node, flow: flow_edge}.
+        """
+        random.seed()
+        for row in cursor:
+            src_node = cls._node2json(cls._flow2host(row, 'src'))
+            dst_node = cls._node2json(cls._flow2host(row, 'dst'))
+            flow_node = []
+            if mode == "flow_map":
+                flow_node = cls._edge2json_flow_map(row)
+            elif mode == "talk_map":
+                flow_node = cls._edge2json_talk_map(row)
+            else:
+                flow_node = cls._edge2json_default(row, timeline=timeline,
+                                                   after=after, before=before,
+                                                   precision=precision)
+            yield {"src": src_node, "dst": dst_node, "flow": flow_node}
+
+    @classmethod
+    def cursor2json_graph(cls, cursor, mode, timeline, after=None,
+                          before=None, precision=None):
+        """
+        Returns a dict {"nodes": [], "edges": []} representing the output
+        graph.
+        Nodes are unique hosts. Edges are flows, formatted according to the
+        given mode.
+        """
+        g = {"nodes": [], "edges": []}
+        # Store unique hosts
+        hosts = {}
+        # Store tuples (source, dest) for flow and talk map modes.
+        edges = {}
+        for row in cls.cursor2json_iter(cursor, mode=mode, timeline=timeline,
+                                        after=after, before=before,
+                                        precision=precision):
+            if mode in ["flow_map", "talk_map"]:
+                flw = row["flow"]
+                # If this edge already exists
+                if (flw["source"], flw["target"]) in edges:
+                    edge = edges[(flw["source"], flw["target"])]
+                    if mode == "flow_map":
+                        # In flow map mode, store flows data in each edge
+                        flows = flw["data"]["flows"]
+                        if flows[0] not in edge["data"]["flows"]:
+                            edge["data"]["flows"].append(flows[0])
+                            edge["data"]["count"] += 1
+                else:
+                    edges[(flw["source"], flw["target"])] = flw
+            else:
+                g["edges"].append(row["flow"])
+            for host in (row["src"], row["dst"]):
+                if host["id"] in hosts:
+                    hosts[host["id"]]["data"]["firstseen"] = min(
+                        hosts[host["id"]]["data"]["firstseen"],
+                        host["data"]["firstseen"])
+                    hosts[host["id"]]["data"]["lastseen"] = max(
+                        hosts[host["id"]]["data"]["lastseen"],
+                        host["data"]["lastseen"])
+                else:
+                    hosts[host["id"]] = host
+        g["nodes"] = list(viewvalues(hosts))
+        if mode in ["flow_map", "talk_map"]:
+            g["edges"] = list(viewvalues(edges))
+        return g
+
 
 class MetaDB(object):
 
@@ -2942,7 +3209,7 @@ class MetaDB(object):
         "flow": {
             "neo4j": ("neo4j", "Neo4jDBFlow"),
             "mongodb": ("mongo", "MongoDBFlow"),
-            "postgresql": ("sql.postgres", "PostgresDBFlow"),
+            "tinydb": ("tiny", "TinyDBFlow"),
         },
         "view": {
             "elastic": ("elastic", "ElasticDBView"),

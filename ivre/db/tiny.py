@@ -37,13 +37,13 @@ from uuid import uuid1, UUID
 from future.builtins import int as int_types
 from future.utils import viewitems
 from past.builtins import basestring
-from tinydb import TinyDB as TDB, Query
+from tinydb import TinyDB as TDB, Query, where
 from tinydb.database import Document
 from tinydb.operations import add, increment
 
 
-from ivre.db import DB, DBActive, DBAgent, DBNmap, DBPassive, DBView, LockError
-from ivre import utils
+from ivre.db import DB, DBActive, DBAgent, DBFlow, DBNmap, DBPassive, DBView, LockError
+from ivre import config, flow, utils
 from ivre.xmlnmap import ALIASES_TABLE_ELEMS, Nmap2DB
 
 
@@ -155,6 +155,16 @@ class TinyDB(DB):
         if fields is not None:
             return [_extractor(rec, fields) for rec in result]
         return result
+
+    def get_one(self, *args, **kargs):
+        """Same function as get, except the first record matching "spec" (or
+None) is returned.
+
+        """
+        try:
+            return self.get(*args, **kargs)[0]
+        except IndexError:
+            return None
 
     @staticmethod
     def _searchstring_re_inarray(query, value, neg=False):
@@ -1776,6 +1786,82 @@ This will be used by TinyDBNmap & TinyDBView
                  if host.get('openports', {}).get('count') is not None),
                 len(res))
 
+    @classmethod
+    def _upsert_op(cls, current, arg, fnt):
+        for field, value in viewitems(arg):
+            if isinstance(value, dict):
+                cls._upsert_op(current.setdefault(field, {}), value, fnt)
+            else:
+                fnt(current, field, value)
+
+    @classmethod
+    def upsert_min(cls, current, arg):
+        def fnt(current, field, value):
+            if field in current:
+                current[field] = min(current[field], value)
+            else:
+                current[field] = value
+        cls._upsert_op(current, arg, fnt) 
+
+    @classmethod
+    def upsert_max(cls, current, arg):
+        def fnt(current, field, value):
+            if field in current:
+                current[field] = max(current[field], value)
+            else:
+                current[field] = value
+        cls._upsert_op(current, arg, fnt) 
+
+    @classmethod
+    def upsert_inc(cls, current, arg):
+        def fnt(current, field, value):
+            if field in current:
+                current[field] += value
+            else:
+                current[field] = value
+        cls._upsert_op(current, arg, fnt) 
+
+    @classmethod
+    def upsert_addToSet(cls, current, arg):
+        def fnt(current, field, value):
+            if isinstance(value, list):
+                if field not in current:
+                    current[field] = list()
+                for elt in value:
+                    fnt(current, field, elt)
+            elif isinstance(value, dict):
+                # This case handles a list of dicts
+                if value not in current[field]:
+                    current[field].append(value)
+            else:
+                current_set = set(current.get(field, {}))
+                current_set.add(value)
+                current[field] = list(current_set)
+        cls._upsert_op(current, arg, fnt)
+            
+
+    def upsert(self, findspec, updatespec):
+        """
+        Performs an upsert operation
+        Returns 1 if the entry wasn't present, 0 otherwise
+        """
+        q = Query()
+        for field, value in viewitems(findspec):
+            q = self.flt_and(q, where(field) == value)
+        current = self.get_one(q)
+        exists = current is not None
+        if not exists:
+            current = findspec
+        for op, arg in viewitems(updatespec):
+            op(current, arg)
+        if exists:
+            self.db.update(current, doc_ids=[current.doc_id])
+            return 0
+        else:
+            self.db.insert(current)
+            return 1
+
+
 
 class TinyDBNmap(TinyDBActive, DBNmap):
 
@@ -1932,16 +2018,6 @@ returns a list of results.
 
         """
         return list(self._get(*args, **kargs))
-
-    def get_one(self, *args, **kargs):
-        """Same function as get, except the first record matching "spec" (or
-None) is returned.
-
-        """
-        try:
-            return self.get(*args, **kargs)[0]
-        except IndexError:
-            return None
 
     def insert(self, spec, getinfos=None):
         """Inserts the record "spec" into the passive column."""
@@ -2529,3 +2605,231 @@ scan object on success, and raises a LockError on failure.
     def get_masters(self):
         return (x.doc_id for x in
                 self.db_masters.search(Query()))
+
+class TinyDBFlowBulk(object):
+
+    def __init__(self, db):
+        self.db = db
+        self.entries = list()
+    
+    def execute(self):
+        inserted = upserted = 0
+        for findspec, updatespec in self.entries:
+            res = self.db.upsert(findspec, updatespec)
+            if res == 1:
+                inserted += 1
+            else:
+                upserted += 1
+        return {'nInserted': inserted, 'nUpserted': upserted}
+            
+
+    def add(self, findspec, updatespec):
+        self.entries.append((findspec, updatespec))
+
+
+class TinyDBFlow(TinyDB, DBFlow):
+    """A Flow-specific DB using TinyDB backend"""
+
+    dbname = "flow"
+   
+    def __init__(self, url):
+        super(TinyDBFlow, self).__init__(url)
+
+
+    def start_bulk_insert(self):
+        return TinyDBFlowBulk(self)
+    
+    @staticmethod
+    def bulk_commit(bulk):
+        DBFlow.bulk_commit(bulk)
+
+    @staticmethod
+    def _get_flow_key(rec):
+        """
+        Returns a dict which represents the given flow in Flows.
+        """
+        key = {
+            'src_addr': rec['src_addr'],
+            'dst_addr': rec['dst_addr'],
+            'proto': rec['proto'],
+            'schema_version': flow.SCHEMA_VERSION
+        }
+        if rec['proto'] in ['udp', 'tcp']:
+            key['dport'] = rec['dport']
+        elif rec['proto'] == 'icmp':
+            key['type'] = rec['type']
+
+        return key
+        
+    def get(self, flt, skip=None, limit=None, orderby=None, fields=None):
+        """
+        Queries the flow database with the provided arguments and returns
+        an iterator over results.
+        """
+        return super(TinyDBFlow, self).get(flt, fields=fields, skip=skip,
+                sort=orderby, limit=limit)
+
+    @classmethod
+    def _update_timeslots(cls, updatespec, rec):
+        """
+        If configured, adds timeslots in `updatespec`.
+        config.FLOW_TIME enables timeslots.
+        if config.FLOW_TIME_FULL_RANGE is set, a flow is linked to every
+        timeslots between its start_time and end_time.
+        Otherwise, it is only linked to the timeslot corresponding to its
+        start_time.
+        """
+        if config.FLOW_TIME:
+            if config.FLOW_TIME_FULL_RANGE:
+                timeslots = cls._get_timeslots(
+                        rec['start_time'], rec['end_time'])
+                for i, timeslot in enumerate(timeslots):
+                    timeslots[i] = {
+                        'start': utils.datetime2timestamp(timeslot['start']),
+                        'duration': timeslot['duration']
+                    }
+                updatespec.setdefault(
+                    cls.upsert_addToSet, {})["times"] = timeslots
+            else:
+                timeslot = cls._get_timeslot(rec['start_time'],
+                                             config.FLOW_TIME_PRECISION,
+                                             config.FLOW_TIME_BASE)
+                timeslot = {
+                    "start": utils.datetime2timestamp(timeslot["start"]),
+                    "duration": timeslot["duration"]
+                }
+                updatespec.setdefault(
+                    cls.upsert_addToSet, {})["times"] = timeslot
+                        
+    @classmethod
+    def any2flow(cls, bulk, name, rec):
+        """
+        Takes a parsed *.log line entry and adds it to insert bulk.
+        It is responsible for metadata processing (all but conn.log files).
+        """
+        # Convert addrs
+        rec['src_addr'] = cls.ip2internal(rec['src'])
+        rec['dst_addr'] = cls.ip2internal(rec['dst'])
+        # Insert in flows
+        findspec = cls._get_flow_key(rec)
+        updatespec = {
+            cls.upsert_min: {'firstseen':
+                utils.datetime2timestamp(rec['start_time'])},
+            cls.upsert_max: {'lastseen':
+                utils.datetime2timestamp(rec['end_time'])},
+            cls.upsert_inc: {'meta': {name: {'count': 1}}}
+        }
+
+        # This represents the kinds of metadata that are defined in flow.META_DESC
+        # Each kind is associated with an aggregation operator used for
+        # insertion in db.
+        meta_kinds = {
+            'keys': cls.upsert_addToSet,
+            'counters': cls.upsert_inc
+        }
+
+        # metadata storage can be disabled.
+        if config.FLOW_STORE_METADATA:
+            for kind, op in viewitems(meta_kinds):
+                for key, value in viewitems(cls.meta_desc[name].get(kind, {})):
+                    if not rec[value]:
+                        continue
+                    updatespec.setdefault(op, {})\
+                        .setdefault('meta', {})\
+                        .setdefault(name, {})[key] = rec[value]
+
+        cls._update_timeslots(updatespec, rec)
+        
+        bulk.add(findspec, updatespec)
+
+    @classmethod
+    def conn2flow(cls, bulk, rec):
+        """
+        Takes a parsed conn.log line entry and adds it to flow bulk.
+        """
+        rec['src_addr'] = cls.ip2internal(rec['src'])
+        rec['dst_addr'] = cls.ip2internal(rec['dst'])
+        findspec = cls._get_flow_key(rec)
+
+        updatespec = {
+            cls.upsert_min: {'firstseen': utils.datetime2timestamp(rec['start_time'])},
+            cls.upsert_max: {'lastseen': utils.datetime2timestamp(rec['end_time'])},
+            cls.upsert_inc: {
+                'cspkts': rec['orig_pkts'],
+                'scpkts': rec['resp_pkts'],
+                'csbytes': rec['orig_ip_bytes'],
+                'scbytes': rec['resp_ip_bytes'],
+                'count': 1
+            },
+        }
+
+        cls._update_timeslots(updatespec, rec)
+
+        if rec['proto'] in ['udp', 'tcp']:
+            updatespec.setdefault(cls.upsert_addToSet, {})["sports"] = rec["sport"]
+        elif rec['proto'] == 'icmp':
+            updatespec.setdefault(cls.upsert_addToSet, {})["codes"] = rec["code"]
+
+        bulk.add(findspec, updatespec)
+    
+    @classmethod
+    def flow2flow(cls, bulk, rec):
+        """
+        Takes an entry coming from Netflow or Argus and adds it to bulk.
+        """
+        rec['src_addr'] = cls.ip2internal(rec['src'])
+        rec['dst_addr'] = cls.ip2internal(rec['dst'])
+        findspec = cls._get_flow_key(rec)
+
+        updatespec = {
+            cls.upsert_min: {'firstseen': rec['start_time']},
+            cls.upsert_max: {'lastseen': rec['end_time']},
+            cls.upsert_inc: {
+                'cspkts': rec['cspkts'],
+                'scpkts': rec['scpkts'],
+                'csbytes': rec['csbytes'],
+                'scbytes': rec['scbytes'],
+                'count': 1
+            },
+        }
+
+        cls._update_timeslots(updatespec, rec)
+
+        if rec['proto'] in ['udp', 'tcp']:
+            updatespec.setdefault(cls.upsert_addToSet, {})["sports"] = rec["sport"]
+        elif rec['proto'] == 'icmp':
+            updatespec.setdefault(cls.upsert_addToSet, {})["codes"] = rec["code"]
+
+        bulk.add(findspec, updatespec)
+
+    def cleanup_flows(self):
+        # TODO
+        pass
+
+
+    @classmethod
+    def from_filters(cls, filters, limit=None, skip=0, orderby="", mode=None,
+                     timeline=False, after=None, before=None, precision=None):
+        """
+        Overloads from_filters method from MongoDB.
+        It transforms flow.Query object returned by super().from_filters
+        in TinyDB filter and returns it.
+        Note: limit, skip, orderby, mode, timeline are IGNORED. They are
+        present only for compatibility reasons.
+        """
+        query = (super(MongoDBFlow, cls)
+                 .from_filters(filters, limit=limit, skip=skip,
+                               orderby=orderby, mode=mode, timeline=timeline))
+        flt = cls.flt_from_query(query)
+        # TODO 
+        # times_filter = {}
+        # if after:
+        #     times_filter.setdefault('start', {})['$gte'] = after
+        # if before:
+        #     times_filter.setdefault('start', {})['$lt'] = before
+        # if precision:
+        #     times_filter['duration'] = precision
+        # if times_filter:
+        #     flt = cls.flt_and(flt, {'times': {'$elemMatch': times_filter}})
+        return flt
+
